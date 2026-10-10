@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.app import probe
-from backend.app.config import Settings
-from backend.app.integrations.xhs import SourcePaused
-from backend.app.probe import collect_xhs, failure, route_summary, save_json
+from easytrip import probe
+from easytrip.config import Settings
+from easytrip.integrations.xhs import SourcePaused
+from easytrip.probe import collect_xhs, failure, route_summary, save_json
 
 
 @pytest.mark.parametrize(

@@ -534,9 +534,9 @@ def write_report(report, notes):
         "",
         "## 复现",
         "",
-        "在 app/ 执行 `uv sync --locked`、`uv run python -m backend.app.probe`；`--reuse` 复用上轮已读详情，避免再次采集。",
+        "在仓库根目录执行 `uv --directory backend sync --locked`、`uv --directory backend run python -m easytrip.probe`；`--reuse` 复用上轮已读详情，避免再次采集。",
         "",
-        "地图：`uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --no-access-log`，打开 http://127.0.0.1:8000。",
+        "地图：`uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log`，打开 http://127.0.0.1:8000。",
     ]
     if "xhs_failure" in report:
         lines += [

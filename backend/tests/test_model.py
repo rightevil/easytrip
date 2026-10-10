@@ -4,8 +4,8 @@ import json
 import httpx
 import pytest
 
-from backend.app.config import Settings
-from backend.app.integrations.model import extract, image_url
+from easytrip.config import Settings
+from easytrip.integrations.model import extract, image_url
 
 
 def settings(base="https://model.example/v1"):

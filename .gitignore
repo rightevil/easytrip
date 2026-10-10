@@ -1,16 +1,31 @@
-docs
+# Secrets and local configuration
 .env
 .env.*
 !.env.example
-!app/.env.example
+**/cookies.json
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python and Node tooling
 .venv/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
-app/data/
+*.py[cod]
+frontend/node_modules/
+frontend/dist/
+
+# Generated and runtime data
+data/
+reports/
 *.log
 .planning/
 findings.md
 progress.md
 task_plan.md
-app/reports/
+
+# Keep legacy local design files private by default.
+# Only explicitly reviewed documentation is tracked here.
+docs/*
+!docs/README.md

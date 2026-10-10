@@ -5,15 +5,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from backend.app import config
-from backend.app.config import Settings, direct_client, validate_url
+from easytrip import config
+from easytrip.config import Settings, direct_client, validate_url
 
 
 def test_agnes_aliases_are_case_insensitive_and_settings_repr_is_safe(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(config, "ROOT_DIR", tmp_path)
-    monkeypatch.setattr(config, "APP_DIR", tmp_path / "app")
+    monkeypatch.setattr(config, "BACKEND_DIR", tmp_path / "backend")
     monkeypatch.setattr(config.os, "environ", {})
     (tmp_path / ".env").write_text(
         "Agnes_url=https://agnes.example/v1\nagnes_Key=model-secret\nAGNES_MODEL=vision-model\n",
@@ -35,7 +35,7 @@ def test_agnes_aliases_are_case_insensitive_and_settings_repr_is_safe(
 
 def test_environment_model_settings_override_dotenv_aliases(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ROOT_DIR", tmp_path)
-    monkeypatch.setattr(config, "APP_DIR", tmp_path / "app")
+    monkeypatch.setattr(config, "BACKEND_DIR", tmp_path / "backend")
     monkeypatch.setattr(
         config.os,
         "environ",

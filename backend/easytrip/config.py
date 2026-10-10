@@ -9,10 +9,10 @@ from urllib.parse import urlsplit
 import httpx
 from dotenv import dotenv_values
 
-APP_DIR = Path(__file__).resolve().parents[2]
-ROOT_DIR = APP_DIR.parent
-DATA_DIR = APP_DIR / "data"
-EXPORT_DIR = APP_DIR / "reports" / "p0"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = BACKEND_DIR.parent
+DATA_DIR = ROOT_DIR / "data"
+EXPORT_DIR = ROOT_DIR / "reports" / "p0"
 
 
 @dataclass(repr=False)
@@ -31,7 +31,7 @@ class Settings:
     def load(cls):
         values = {
             **dotenv_values(ROOT_DIR / ".env"),
-            **dotenv_values(APP_DIR / ".env"),
+            **dotenv_values(BACKEND_DIR / ".env"),
             **os.environ,
         }
         settings = cls(

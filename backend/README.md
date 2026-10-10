@@ -4,29 +4,29 @@
 
 ## Windows 使用
 
-Python 与依赖均由 uv 管理，环境位于 `app/.venv`，锁定版本位于 `app/uv.lock`。需已安装 uv；无需全局 pip 安装。根目录 `.env` 会自动读取，`app/.env` 如存在则覆盖同名项，环境变量优先级最高。
+Python 与依赖均由 uv 管理，环境位于 `backend/.venv`，锁定版本位于 `backend/uv.lock`。需已安装 uv；无需全局 pip 安装。根目录 `.env` 会自动读取，`backend/.env` 如存在则覆盖同名项，环境变量优先级最高。
 
 从仓库根目录执行：
 
 ```powershell
-uv --directory app sync --locked
-uv --directory app run python -m backend.app.probe
-uv --directory app run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+uv --directory backend sync --locked
+uv --directory backend run python -m easytrip.probe
+uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-打开 http://127.0.0.1:8000 查看地图。如果 uv 不在 PATH，可以使用 `app/scripts/p0.ps1`，它会查找用户目录 `.local/bin/uv.exe`：
+打开 http://127.0.0.1:8000 查看地图。如果 uv 不在 PATH，可以使用 `scripts/probes/p0.ps1`，它会查找用户目录 `.local/bin/uv.exe`：
 
 ```powershell
-./app/scripts/p0.ps1 probe
-./app/scripts/p0.ps1 serve
-./app/scripts/p0.ps1 test
+./scripts/probes/p0.ps1 probe
+./scripts/probes/p0.ps1 serve
+./scripts/probes/p0.ps1 test
 ```
 
-已有真实笔记检查点时，用 `uv --directory app run python -m backend.app.probe --reuse` 仅复用详情，再验证模型和高德；脚本支持 `./app/scripts/p0.ps1 probe -Reuse`。重复执行会产生新的模型和地图服务调用，按账号实际计费。
+已有真实笔记检查点时，用 `uv --directory backend run python -m easytrip.probe --reuse` 仅复用详情，再验证模型和高德；脚本支持 `./scripts/probes/p0.ps1 probe -Reuse`。重复执行会产生新的模型和地图服务调用，按账号实际计费。
 
 ## 配置
 
-参照 [.env.example](.env.example)，真实密钥只放被 Git 忽略的 `.env`。
+参照 [.env.example](../.env.example)，真实密钥只放被 Git 忽略的 `.env`。
 
 - 小红书：`XHS_MCP`，完整 HTTP MCP URL；服务由用户维护，登录/验证码由用户处理，本应用不启动 MCP 子进程。
 - 高德：`AMAP_WEB_KEY`、`AMAP_JS_KEY`、`AMAP_JS_SECURE_KEY`。远程官方 MCP 默认复用 Web Key，可用 `AMAP_MCP_URL` 单独配置。
@@ -42,7 +42,7 @@ uv --directory app run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 
 各 HTTPX 客户端显式关闭环境代理继承，并注入 MCP SDK 实际 transport。小红书服务端浏览器出口由用户独立核验，本应用不会修改代理、登录或服务状态。网络异常、未登录与空业务结果都在报告中分别记录；异常不输出带凭证 URL。
 
-两个现有小红书 exe 强制忽略系统代理的命令见 [小红书直连说明](docs/xhs-direct.md)。该设置只影响用户随后启动的子进程，不会被 P0 脚本自动应用。
+小红书服务端的代理配置由用户自行管理。本仓库不包含本地直连命令或登录凭证；P0 脚本不会修改 MCP 服务的代理、登录或会话状态。
 
 ## 产物与检查
 
@@ -54,8 +54,8 @@ uv --directory app run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 - `data/`：被 Git 忽略的本地检查点和运行数据；保留匿名来源内容和图片地址以便复用，不包含登录 Cookies。
 
 ```powershell
-uv --directory app run python -m pytest -q
-uv --directory app run ruff check .
+uv --directory backend run python -m pytest -q
+uv --directory backend run ruff check .
 ```
 
 自动回归使用脱敏夹具/模拟传输和本机 HTTPServer，不再次访问真实账号。报告只声明已验证能力；少量样本不提供统计准确率或固定人民币成本。

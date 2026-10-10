@@ -5,9 +5,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.config import Settings
-from backend.app.integrations.amap import Amap, AmapError
-from backend.app.main import create_app
+from easytrip.config import Settings
+from easytrip.integrations.amap import Amap, AmapError
+from easytrip.main import create_app
 
 
 def test_web_api_parameters_and_raw_response():
@@ -89,7 +89,7 @@ def test_invalid_route_location_never_requests_upstream(location):
 
 
 def test_map_credentials_and_proxy_are_restricted(tmp_path, monkeypatch):
-    from backend.app import main
+    from easytrip import main
 
     settings = Settings(
         amap_web_key="web-secret",

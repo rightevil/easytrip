@@ -9,9 +9,9 @@ from jsonschema.exceptions import ValidationError
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
-from backend.app.config import Settings
-from backend.app.integrations import xhs
-from backend.app.integrations.xhs import (
+from easytrip.config import Settings
+from easytrip.integrations import xhs
+from easytrip.integrations.xhs import (
     ReadOnlyMCP,
     SourcePaused,
     normalize_note,
