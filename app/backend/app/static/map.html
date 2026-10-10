@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EasyTrip · P0 地图验证</title>
+  <style>
+    :root { font: 15px/1.6 system-ui, sans-serif; color: #172e35; background: #f2f5f3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 18px 24px; background: #fff; border-bottom: 1px solid #dce4e0; }
+    h1 { margin: 0; font-size: 22px; } p { margin: 4px 0; }
+    main { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 105px); }
+    aside { padding: 20px 24px; overflow: auto; } #map { min-height: 580px; }
+    h2 { font-size: 16px; margin: 18px 0 8px; } ul { margin: 0; padding: 0; list-style: none; }
+    li { padding: 8px 0; border-bottom: 1px solid #dce4e0; } small { display: block; color: #526971; }
+    button { padding: 0; color: #176e62; background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
+    button:focus-visible { outline: 2px solid #176e62; outline-offset: 4px; }
+    .pin { width: 30px; height: 30px; border-radius: 50%; background: #176e62; color: white; border: 2px solid white; text-align: center; line-height: 26px; box-shadow: 0 2px 6px #0004; }
+    .origin { background: #b4512e; } #status { color: #526971; } .error { color: #a83626 !important; }
+    @media (max-width: 760px) { main { grid-template-columns: 1fr; } #map { min-height: 65vh; grid-row: 1; } }
+  </style>
+</head>
+<body>
+  <header><h1>EasyTrip · 真实地图验证</h1><p id="status" role="status" aria-live="polite">正在读取 P0 样本…</p></header>
+  <main>
+    <aside><p>橙色为出发点，绿色为候选。显示的线段均来自高德路线返回。</p><h2>出发点与候选</h2><ul id="places"></ul><h2>交通样本</h2><ul id="routes"></ul></aside>
+    <div id="map" aria-label="高德地图：出发点、候选与真实路线"></div>
+  </main>
+  <script>
+    const status = document.getElementById("status");
+    const modes = {walking: "步行", transit: "公共交通", bicycling: "骑行", electrobike: "电动车"};
+    const colors = {walking: "#b4512e", transit: "#3367bd", bicycling: "#176e62", electrobike: "#8755a4"};
+
+    function coordinate(value) {
+      const values = typeof value === "string" ? value.split(",") : value;
+      if (!Array.isArray(values) || values.length !== 2 || values.some(v => typeof v !== "number" && (typeof v !== "string" || !v.trim()))) return null;
+      const [lon, lat] = values.map(Number);
+      return Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lon) <= 180 && Math.abs(lat) <= 90 ? [lon, lat] : null;
+    }
+
+    function polyline(value) {
+      if (typeof value !== "string") return [];
+      const points = value.split(";").map(coordinate);
+      return points.length >= 2 && points.every(Boolean) ? points : [];
+    }
+
+    function routeLines(route) {
+      const lines = [];
+      if (Array.isArray(route.geometry)) {
+        for (const line of route.geometry) {
+          if (!Array.isArray(line)) continue;
+          const points = line.map(coordinate);
+          if (points.length >= 2 && points.every(Boolean)) lines.push(points);
+        }
+      }
+      if (lines.length) return lines;
+      function visit(value) {
+        if (!value || typeof value !== "object") return;
+        if (typeof value.polyline === "string") {
+          const points = polyline(value.polyline);
+          if (points.length) lines.push(points);
+        }
+        for (const child of Object.values(value)) if (child && typeof child === "object") visit(child);
+      }
+      visit(route.paths);
+      return lines;
+    }
+
+    function metric(value) {
+      if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    }
+
+    // P0 self-check: malformed geometry and absent routes must never produce a line.
+    console.assert(polyline("120.1,30.2;bad").length === 0);
+    console.assert(routeLines({paths: []}).length === 0);
+    console.assert(routeLines({paths: [{steps: [{polyline: "120.1,30.2;120.2,30.3"}]}]}).length === 1);
+    console.assert(coordinate([true, 30]) === null);
+    console.assert(metric(null) === null && metric("60") === 60);
+
+    async function read(url) {
+      const response = await fetch(url);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "样本读取失败");
+      return payload;
+    }
+
+    async function start() {
+      const [config, data] = await Promise.all([read("/api/map-config"), read("/api/map-data")]);
+      if (data.coordinate_system !== "GCJ-02") throw new Error("样本坐标系未知，无法绘制");
+      window._AMapSecurityConfig = {serviceHost: config.serviceHost};
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        const timeout = setTimeout(() => reject(new Error("高德 JS SDK 加载超时")), 20000);
+        script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(config.key)}`;
+        script.onload = () => { clearTimeout(timeout); resolve(); };
+        script.onerror = () => { clearTimeout(timeout); reject(new Error("高德 JS SDK 加载失败，请检查网络和 JS Key")); };
+        document.head.append(script);
+      });
+      if (!window.AMap) throw new Error("高德 JS SDK 未就绪");
+      const map = new AMap.Map("map", {zoom: 13});
+      let drawnPlaces = 0, drawnLines = 0, unknownPlaces = 0;
+      let summary = "";
+      let loaded = false;
+      const mapTimeout = setTimeout(() => {
+        if (!loaded) { status.textContent = "高德底图加载超时，请检查网络、JS Key 与域名设置。"; status.className = "error"; }
+      }, 20000);
+      map.on("complete", () => { loaded = true; clearTimeout(mapTimeout); status.textContent = summary || "地图已加载，正在绘制样本…"; });
+      const places = [{...(data.origin || {}), isOrigin: true}, ...(data.candidates || [])];
+      for (const [index, place] of places.entries()) {
+        const item = document.createElement("li");
+        const label = `${place.isOrigin ? "出发点" : index} · ${place.name || "名称未知"}`;
+        const position = coordinate(place.location);
+        const button = document.createElement("button");
+        button.textContent = label;
+        item.append(button);
+        const detail = document.createElement("small");
+        detail.textContent = position ? (place.address || "地址未知") : "坐标未知，未绘制";
+        item.append(detail);
+        document.getElementById("places").append(item);
+        if (!position) { button.disabled = true; unknownPlaces++; continue; }
+        const pin = document.createElement("div");
+        pin.className = place.isOrigin ? "pin origin" : "pin";
+        pin.textContent = place.isOrigin ? "起" : String(index);
+        const marker = new AMap.Marker({position, content: pin, title: place.name || "名称未知", anchor: "center"});
+        map.add(marker);
+        button.onclick = () => map.setZoomAndCenter(16, position);
+        marker.on("click", () => { button.focus(); map.setCenter(position); });
+        drawnPlaces++;
+      }
+      for (const route of data.routes || []) {
+        const lines = routeLines(route);
+        for (const path of lines) {
+          map.add(new AMap.Polyline({path, strokeColor: colors[route.mode] || "#526971", strokeWeight: 5, strokeOpacity: .8}));
+          drawnLines++;
+        }
+        const item = document.createElement("li");
+        const seconds = metric(route.duration_seconds);
+        const meters = metric(route.distance_meters);
+        const duration = seconds !== null ? `${Math.ceil(seconds / 60)} 分钟` : "耗时未知";
+        const distance = meters !== null ? `${(meters / 1000).toFixed(2)} 公里` : "距离未知";
+        item.textContent = `${modes[route.mode] || route.mode || "交通方式未知"} · ${duration} · ${distance}`;
+        const detail = document.createElement("small");
+        detail.textContent = lines.length ? "已绘制实际返回路线" : route.status === "不可用" ? `查询失败：${route.reason || "原因未知"}${route.infocode ? `（infocode=${route.infocode}）` : ""}` : "实际路线几何缺失，未绘制";
+        item.append(detail);
+        document.getElementById("routes").append(item);
+      }
+      if (!(data.routes || []).length) document.getElementById("routes").textContent = "尚无可用交通样本。";
+      if (drawnPlaces || drawnLines) map.setFitView();
+      summary = `GCJ-02 · ${drawnPlaces} 个地点 · ${drawnLines} 段实际路线${unknownPlaces ? ` · ${unknownPlaces} 个地点坐标未知` : ""}。`;
+      status.textContent = loaded ? summary : `${summary} 等待高德底图加载…`;
+    }
+
+    start().catch(error => { status.textContent = error.message || "地图加载失败"; status.className = "error"; });
+  </script>
+</body>
+</html>

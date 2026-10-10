@@ -1,0 +1,16 @@
+docs
+.env
+.env.*
+!.env.example
+!app/.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+app/data/
+*.log
+.planning/
+findings.md
+progress.md
+task_plan.md
+app/reports/
