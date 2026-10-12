@@ -1,6 +1,8 @@
 """Bounded structured model calls; image observations still require human review."""
 
 import asyncio
+import codecs
+import io
 import json
 import re
 from typing import Annotated, Literal
@@ -111,6 +113,124 @@ def validate_extraction(
     return result
 
 
+async def _response_payload(response, record):
+    async def chunks():
+        received = 0
+        async for chunk in response.aiter_bytes():
+            received += len(chunk)
+            if received > 8 * 1024 * 1024:
+                raise httpx.RemoteProtocolError("模型响应超过限制")
+            yield chunk
+
+    if "text/event-stream" not in response.headers.get("content-type", "").lower():
+        try:
+            return json.loads(b"".join([chunk async for chunk in chunks()]))
+        except (ValueError, UnicodeError) as error:
+            raise httpx.RemoteProtocolError("模型响应不是有效JSON") from error
+
+    async def lines():
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(), translate=True
+        )
+        buffer = ""
+        try:
+            async for chunk in chunks():
+                buffer += decoder.decode(chunk)
+                while "\n" in buffer:
+                    line, _, buffer = buffer.partition("\n")
+                    yield line
+            buffer += decoder.decode(b"", final=True)
+        except UnicodeError as error:
+            raise httpx.RemoteProtocolError("模型流式编码无效") from error
+        if buffer:
+            for line in buffer.split("\n"):
+                yield line
+
+    answer, event = [], []
+    finish_reason, done, answer_size = None, False, 0
+
+    def consume(value):
+        nonlocal finish_reason, answer_size
+        if value.strip() == "[DONE]":
+            return True
+        try:
+            chunk = json.loads(value)
+            if not isinstance(chunk, dict) or chunk.get("error") is not None:
+                raise ValueError("invalid event")
+            usage = chunk.get("usage")
+            if isinstance(usage, dict):
+                counts = {
+                    key: usage[key]
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    if type(usage.get(key)) is int and usage[key] >= 0
+                }
+                record.setdefault("usage", {}).update(counts)
+                record["usage_complete"] = len(record["usage"]) == 3
+                details = usage.get("completion_tokens_details")
+                reasoning = (
+                    details.get("reasoning_tokens")
+                    if isinstance(details, dict)
+                    else None
+                )
+                if type(reasoning) is int and reasoning >= 0:
+                    record["reasoning_tokens"] = reasoning
+            for choice in chunk.get("choices", []):
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                if delta.get("reasoning_content"):
+                    record["reasoning_returned"] = True
+                text = delta.get("content")
+                if text is not None:
+                    if not isinstance(text, str):
+                        raise ValueError("invalid content")
+                    answer_size += len(text.encode("utf-8"))
+                    if answer_size > 1024 * 1024:
+                        raise ValueError("answer limit")
+                    answer.append(text)
+                reason = choice.get("finish_reason")
+                if reason is not None:
+                    if not isinstance(reason, str) or not reason or len(reason) > 100:
+                        raise ValueError("invalid finish reason")
+                    finish_reason = reason
+        except (ValueError, TypeError, AttributeError, KeyError) as error:
+            raise httpx.RemoteProtocolError("模型流式事件无效") from error
+        return False
+
+    async for line in lines():
+        if not line:
+            if event:
+                done = consume("\n".join(event))
+                event = []
+                if done:
+                    break
+        elif line.startswith("data:"):
+            event.append(line[5:].lstrip(" "))
+        elif line.startswith("event:") and line[6:].strip() == "error":
+            raise httpx.RemoteProtocolError("模型流式响应返回错误事件")
+    if event and not done:
+        done = consume("\n".join(event))
+    if not done or finish_reason is None:
+        raise httpx.RemoteProtocolError("模型流式响应未明确结束")
+    usage = dict(record.get("usage", {}))
+    if "reasoning_tokens" in record:
+        usage["completion_tokens_details"] = {
+            "reasoning_tokens": record["reasoning_tokens"]
+        }
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": "".join(answer),
+                    "reasoning_content": record.get("reasoning_returned", False),
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
+
+
 async def structured_call(
     client,
     settings,
@@ -169,28 +289,32 @@ async def structured_call(
         output = ""
         network_failed = False
         try:
-            response = await client.post(
-                endpoint,
-                timeout=httpx.Timeout(40, read=300),
-                headers={"Authorization": f"Bearer {settings.model_api_key}"},
-                json={
-                    "model": settings.model_id,
-                    "max_tokens": TOKEN_BUDGETS[current_type],
-                    "chat_template_kwargs": {"enable_thinking": True},
-                    "messages": messages,
-                    "stream": False,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                async with asyncio.timeout(600):
+                    async with client.stream(
+                        "POST",
+                        endpoint,
+                        timeout=httpx.Timeout(40, read=300),
+                        headers={"Authorization": f"Bearer {settings.model_api_key}"},
+                        json={
+                            "model": settings.model_id,
+                            "max_tokens": TOKEN_BUDGETS[current_type],
+                            "chat_template_kwargs": {"enable_thinking": True},
+                            "messages": messages,
+                            "stream": True,
+                            "response_format": {"type": "json_object"},
+                        },
+                    ) as response:
+                        response.raise_for_status()
+                        payload = await _response_payload(response, record)
+            except TimeoutError as error:
+                raise httpx.ReadTimeout("模型请求超过时间上限") from error
             call_usage = payload.get("usage") if isinstance(payload, dict) else None
             counts = {}
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 count = call_usage.get(key) if isinstance(call_usage, dict) else None
                 if type(count) is int and count >= 0:
                     counts[key] = count
-                    usage[key] = usage.get(key, 0) + count
             record["usage_complete"] = len(counts) == 3
             record["usage"] = counts
             record["result_unknown"] = False
@@ -204,9 +328,6 @@ async def structured_call(
             )
             if type(reasoning_tokens) is int and reasoning_tokens >= 0:
                 record["reasoning_tokens"] = reasoning_tokens
-                usage["reasoning_tokens"] = (
-                    usage.get("reasoning_tokens", 0) + reasoning_tokens
-                )
             choice = payload["choices"][0]
             if not isinstance(choice, dict) or not isinstance(
                 choice.get("message"), dict
@@ -224,6 +345,8 @@ async def structured_call(
             output = choice["message"]["content"]
             if not isinstance(output, str):
                 raise TypeError("模型响应 content 必须为 JSON 字符串")
+            if len(output.encode("utf-8")) > 1024 * 1024:
+                raise httpx.RemoteProtocolError("模型答案超过限制")
             result = validator(output)
             data = (
                 result.model_dump(mode="json")
@@ -236,7 +359,7 @@ async def structured_call(
             raise
         except httpx.HTTPError as error:
             error_summary = type(error).__name__
-            record.update(status="failed", error=error_summary)
+            record.update(status="failed", error=error_summary, result_unknown=True)
             if isinstance(error, httpx.HTTPStatusError):
                 record["http_status"] = error.response.status_code
             network_failed = True
@@ -252,6 +375,12 @@ async def structured_call(
                 error_summary = settings.redact(str(error))
             record.update(status="failed", error=error_summary)
         finally:
+            for key, count in record.get("usage", {}).items():
+                usage[key] = usage.get(key, 0) + count
+            if "reasoning_tokens" in record:
+                usage["reasoning_tokens"] = (
+                    usage.get("reasoning_tokens", 0) + record["reasoning_tokens"]
+                )
             if after_request:
                 metadata = dict(record)
                 metadata["image_context"] = image_context
