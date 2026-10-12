@@ -6,7 +6,9 @@ P2 第一步增加连续迁移 `002_discovery.sql`。稳定来源按行程、平
 
 地点提及、活动、证据、待定位候选和吃住缺口同时保留 `trip_id/run_id/request_version`。写入先检查运行代次和当前条件，再在同一事务中校验来源及引用。图片引用记录实际提交的原始图片序号和待核验观察，不冒充正文或确定的体验。当前读取默认排除旧条件结果，指定 Run 可以查看历史；读取损坏对象返回存储错误，不重建数据。
 
-只读 API：`GET /api/trips/{id}/candidates`、`/candidates/{candidate_id}/evidence`、`/sources?run_id=...`、`/sources/{source_id}?run_id=...`、`/gaps`。证据、来源列表与缺口返回 `{items}`，候选另含分页字段。作者身份仅保留后端不可逆哈希用于覆盖统计，公开来源不返回该字段。
+连续迁移 `003_discovery_actions.sql` 增加私有调用台账、受限来源句柄、逐笔记检查点、消息与发现任务关联，以及显式采用方向的幂等记录。外部调用在发送前计数；结果或费用未知时保留记录和模型输出 token 预留，恢复不会清零。实际 token 包含输入，服务不能预报其大小，预留不保证最终实际总量绝不超出。
+
+只读 API：`GET /api/trips/{id}/candidates`、`/candidates/{candidate_id}/evidence`、`/sources?run_id=...`、`/sources/{source_id}?run_id=...`、`/gaps`。来源列表与缺口返回 `{items}`，候选另含分页字段。证据响应为 `{items, sources}`，后者仅为该候选提及支持的原文，并不代表赞成评价。作者身份仅保留后端不可逆哈希用于覆盖统计，公开来源不返回该字段。
 
 存储行程、原始待处理消息和任务。行程条件与工作区采用 Pydantic 校验后的 JSON，目的地可空，默认交通为 `mixed` 并记录默认/用户来源。两类版本独立；更新与版本递增在同一事务中提交。写事务使用 `BEGIN IMMEDIATE`，启用外键、级联删除和 WAL。
 

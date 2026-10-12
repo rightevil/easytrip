@@ -9,6 +9,7 @@ from time import monotonic
 from ..config import direct_client
 from ..domain.discovery_tasks import DISCOVERY_STAGES, DiscoverySnapshot
 from ..integrations.xhs import SourcePaused
+from ..services.collection import CollectionService
 from ..services.understanding import understand, validate_understanding
 
 
@@ -75,6 +76,10 @@ class DiscoveryRunner:
             return await self.stages[stage](run, snapshot, client)
         if stage == "understanding":
             return await self._understanding(run, snapshot, client)
+        if stage == "discovering":
+            return await CollectionService(self, run, client).discover(run["checkpoint"]["understanding"]["query_plan"])
+        if stage == "fetching":
+            return await CollectionService(self, run, client).fetch(run["checkpoint"]["discovering"]["feeds"])
         raise DiscoveryStopped("stage_not_available")
 
     async def execute(self, run):
