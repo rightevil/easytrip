@@ -1,6 +1,6 @@
-# EasyTrip P0
+# EasyTrip 后端
 
-本阶段提供真实服务的小样本验证、Agnes 多模态抽取、脱敏报告和一页地图。行程数据库、React 工作区与自动排程在 P1–P6 实现。
+提供 SQLite 行程持久化、[业务 API](easytrip/api/README.md)与 P0 真实服务验证。React 工作区需先在 `frontend/` 构建，正式攻略理解与自动排程留待后续阶段。
 
 ## Windows 使用
 
@@ -14,7 +14,7 @@ uv --directory backend run python -m easytrip.probe
 uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-打开 http://127.0.0.1:8000 查看地图。如果 uv 不在 PATH，可以使用 `scripts/probes/p0.ps1`，它会查找用户目录 `.local/bin/uv.exe`：
+打开 http://127.0.0.1:8000 查看草稿工作区，http://127.0.0.1:8000/p0/map 查看独立地图验证。如果 uv 不在 PATH，可以使用 `scripts/probes/p0.ps1`，它会查找用户目录 `.local/bin/uv.exe`：
 
 ```powershell
 ./scripts/probes/p0.ps1 probe

@@ -1,5 +1,22 @@
-# EasyTrip Frontend (planned)
+# EasyTrip 行程工作区
 
-React / TypeScript 工作区尚未初始化。P0 地图验证页面仍在 `backend/easytrip/static/map.html`，未迁移为 React 组件。
+React + TypeScript + Vite，本地运行于 Node.js 24.15 或更高的 24.x。版本已锁定于 `package-lock.json`。
 
-计划工作区：对话、Top-k 候选池与地图、行程时间表及可编辑版本。实现时再选择构建工具及建立 `src/features/`，避免现阶段产生无用脚手架。
+```powershell
+cd E:\project\easytrip\frontend
+npm ci
+npm run dev
+```
+
+开发页面为 `http://127.0.0.1:5173`，后端需运行于 `http://127.0.0.1:8000`。Vite 仅绑定回环地址，代理 `/api`、`/p0` 和高德安全代理；代理请求的 Origin 设为本机后端地址，后端继续保持来源校验。前端不读取 `.env`，不接触服务密钥。
+
+```powershell
+npm test
+npm run build
+```
+
+`dist/` 是生产构建产物，由同一个 FastAPI 后端托管。P0 地图保留在独立的 `/p0/map`，P1 工作区地图、候选发现和方案生成明确标为尚未接入。
+
+行程条件与工作区分别按请求版本、工作区版本自动保存。保存失败保留编辑并显示重试，发生冲突时可加载最新版本或在最新版本上重新保存本地编辑；切换前尝试保存，失败时要求显式处理。本次会话中每个行程保有独立草稿，刷新或关闭前存在未保存修改会触发浏览器提示，关闭仍可能丢失未提交编辑。成功保存的数据由后端 SQLite 恢复。
+
+新建行程、保存消息的重试使用同一操作 ID。用户消息保存为“待处理”，P1 不进行 AI 解析，也不会调用 Agnes、小红书或高德服务。

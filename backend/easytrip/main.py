@@ -1,4 +1,4 @@
-"""Local P0 map viewer. Credentials and the JS security proxy stay on the backend."""
+"""Local workspace and P0 map viewer; credentials stay on the backend."""
 
 import json
 from contextlib import asynccontextmanager
@@ -6,10 +6,11 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.staticfiles import StaticFiles
 
-from .config import DATA_DIR, EXPORT_DIR, Settings, direct_client
+from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
 from .storage.database import Database
 
 
@@ -18,6 +19,7 @@ def create_app(
     export_dir: Path = EXPORT_DIR,
     *,
     database_path: Path | None = None,
+    frontend_dir: Path = ROOT_DIR / "frontend" / "dist",
 ):
     settings = settings or Settings.load()
     database = Database(
@@ -49,7 +51,22 @@ def create_app(
             return Response("不允许跨来源访问本机服务", status_code=403)
         return await call_next(request)
 
+    application.mount(
+        "/assets", StaticFiles(directory=frontend_dir / "assets", check_dir=False), name="assets"
+    )
+
     @application.get("/")
+    async def workspace_page():
+        index = frontend_dir / "index.html"
+        if not index.is_file():
+            return HTMLResponse(
+                "<h1>工作区尚未构建</h1><p>请在项目根目录执行 npm --prefix frontend ci，"
+                "再执行 npm --prefix frontend run build，然后重新启动服务。</p>"
+                "<a href='/p0/map'>打开 P0 地图验证</a>",
+                status_code=503,
+            )
+        return FileResponse(index, headers={"Cache-Control": "no-store"})
+
     @application.get("/p0/map")
     async def map_page():
         return FileResponse(Path(__file__).parent / "static" / "map.html")

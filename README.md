@@ -1,11 +1,11 @@
 # EasyTrip
 
-旅行与约会规划助手，目标是可交互的行程规划 Agent 产品。当前代码实现的是 **P0 数据源 / 模型 / 地图能力验证**，正式 Agent、React 工作区与持久化尚未实现。
+旅行与约会规划助手。当前实现了 **P1 行程持久化、业务 API 与 React 草稿工作区**，可创建、编辑、保存和重开行程。P0 数据源 / 模型 / 地图验证入口继续保留；真实攻略理解、候选地点和排程尚未接入。
 
 ## 仓库结构
 
-- `backend/`：FastAPI 与现有 P0 探测程序，Python 项目独立使用 uv。
-- `frontend/`：未来的 React 工作区（目前尚未实现）。
+- `backend/`：FastAPI、SQLite 与 P0 探测程序，Python 项目独立使用 uv。
+- `frontend/`：React + TypeScript 草稿工作区，npm 管理锁定依赖。
 - `scripts/probes/`：P0 的 Windows 启动脚本。
 - `docs/`：公开且经过审查的设计文档入口；本地未审核资料暂不自动入库。
 - `data/`、`reports/`：本地运行产物（Git 忽略）。
@@ -17,11 +17,12 @@
 
 ```powershell
 uv --directory backend sync --locked
-uv --directory backend run python -m easytrip.probe
+npm --prefix frontend ci
+npm --prefix frontend run build
 uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-地图验证页面：http://127.0.0.1:8000
+工作区：http://127.0.0.1:8000 。独立 P0 地图验证：http://127.0.0.1:8000/p0/map 。P1 不需要填写外部服务配置。
 
 ```powershell
 ./scripts/probes/p0.ps1 probe
@@ -36,6 +37,7 @@ uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 800
 ```powershell
 uv --directory backend run python -m pytest -q
 uv --directory backend run ruff check .
+npm --prefix frontend test
 ```
 
 ## 提交与版本
@@ -52,4 +54,6 @@ cz bump
 
 ## 说明
 
-当前仍是 P0 验证项目，目录设计为后续 Agent / 业务模块预留演进空间；尚未实现的模块不会用空代码冒充实现。旧的 `app/` 路径已迁移到 `backend/`，迁移后需要重新同步本地 uv 环境。
+条件、消息和工作区保存在 `data/easytrip.sqlite3`（Git 忽略）。保存失败或发生版本冲突时，界面保留当前编辑并提示处理；关闭页面前应等待“已保存”，未发送消息仅在当前浏览器会话中保留。任务骨架在 P1 下一步接入。
+
+前端开发方式见 [frontend/README.md](frontend/README.md)，API 契约见 [backend/easytrip/api/README.md](backend/easytrip/api/README.md)。旧的 `app/` 路径已迁移到 `backend/`。
