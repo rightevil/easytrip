@@ -11,6 +11,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
 from .agent.runner import RunExecutor
+from .api.discovery import make_router as make_discovery_router
 from .api.runs import make_router as make_runs_router
 from .api.trips import make_router as make_trips_router
 from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
@@ -48,6 +49,7 @@ def create_app(
     application.state.executor = executor
     application.include_router(make_trips_router())
     application.include_router(make_runs_router())
+    application.include_router(make_discovery_router())
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )

@@ -26,6 +26,7 @@ from ..domain.tasks import (
     RunSnapshot,
     RunUsage,
 )
+from .discovery import DiscoveryStore
 
 
 class NotFound(Exception):
@@ -55,7 +56,7 @@ def encode(value):
     )
 
 
-class Database:
+class Database(DiscoveryStore):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -78,19 +79,27 @@ class Database:
 
     def initialize(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        migrations = sorted((Path(__file__).parent / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
+        numbers = [int(path.name.split("_", 1)[0]) for path in migrations]
+        if numbers != list(range(1, len(migrations) + 1)):
+            raise RuntimeError("数据库迁移文件不连续")
         with self.connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > len(migrations):
                 raise RuntimeError("数据库版本高于应用支持版本，请使用匹配的应用")
             connection.execute("PRAGMA journal_mode=WAL")
-            if version == 0:
-                migration = (
-                    Path(__file__).parent / "migrations" / "001_initial.sql"
-                ).read_text(encoding="utf-8")
+            if version:
+                # Check P1 compatibility before committing further schema changes.
+                connection.execute("SELECT id,request_version,workspace_version FROM trips LIMIT 0")
+                connection.execute("SELECT id,trip_id,operation_id FROM messages LIMIT 0")
+                connection.execute("SELECT id,generation,checkpoint_json FROM runs LIMIT 0")
+            for number, path in zip(numbers, migrations, strict=True):
+                if number <= version:
+                    continue
                 connection.executescript(
                     "BEGIN IMMEDIATE;\n"
-                    + migration
-                    + "\nPRAGMA user_version=1;\nCOMMIT;"
+                    + path.read_text(encoding="utf-8")
+                    + f"\nPRAGMA user_version={number};\nCOMMIT;"
                 )
             # Fail without resetting user data when an existing database is incompatible.
             connection.execute(
@@ -100,6 +109,8 @@ class Database:
             connection.execute(
                 "SELECT id, generation, checkpoint_json FROM runs LIMIT 0"
             )
+            connection.execute("SELECT source_id,run_id,snapshot_json FROM source_snapshots LIMIT 0")
+            connection.execute("SELECT id,trip_id,request_version,payload_json FROM candidates LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):
