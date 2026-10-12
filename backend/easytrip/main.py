@@ -9,19 +9,35 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .config import EXPORT_DIR, Settings, direct_client
+from .config import DATA_DIR, EXPORT_DIR, Settings, direct_client
+from .storage.database import Database
 
 
-def create_app(settings: Settings | None = None, export_dir: Path = EXPORT_DIR):
+def create_app(
+    settings: Settings | None = None,
+    export_dir: Path = EXPORT_DIR,
+    *,
+    database_path: Path | None = None,
+):
     settings = settings or Settings.load()
+    database = Database(
+        database_path
+        or (DATA_DIR if export_dir == EXPORT_DIR else export_dir) / "easytrip.sqlite3"
+    )
 
     @asynccontextmanager
     async def lifespan(application):
+        database.initialize()
         async with direct_client() as client:
             application.state.http = client
             yield
 
-    application = FastAPI(title="EasyTrip P0 地图验证", lifespan=lifespan)
+    application = FastAPI(title="EasyTrip", lifespan=lifespan)
+    application.state.database = database
+    application.state.settings = settings
+    from .api.trips import make_router
+
+    application.include_router(make_router())
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )
@@ -34,6 +50,7 @@ def create_app(settings: Settings | None = None, export_dir: Path = EXPORT_DIR):
         return await call_next(request)
 
     @application.get("/")
+    @application.get("/p0/map")
     async def map_page():
         return FileResponse(Path(__file__).parent / "static" / "map.html")
 
