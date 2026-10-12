@@ -55,14 +55,13 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
                 row.update(nature="unknown", stance="unknown", link_status="uncertain")
     result = NoteExtraction.model_validate(raw, strict=True)
     image_refs = {(item["source_id"], item["image_index"]) for item in submitted_images}
-    observations = {}
+    observations, errors = {}, []
     for index, observation in enumerate(result.image_observations):
         key = (observation.source_id, observation.image_index)
         if key not in image_refs or key in observations:
-            raise ValueError(
-                f"image_observations[{index}]: 必须唯一引用实际提交的原图片"
-            )
-        observations[key] = observation.text
+            errors.append(f"image_observations[{index}]: 必须唯一引用实际提交的原图片")
+        else:
+            observations[key] = observation.text
 
     def cited(row, path):
         if row.source_id not in sources:
@@ -76,19 +75,39 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
         elif not _supports(row.quote, sources[row.source_id]):
             raise ValueError(f"{path}.quote: 必须逐字属于相应来源的标题或正文")
 
-    ids, renamed = set(), {}
-    invalid_names = [
-        f"mentions[{index}].name: 地点原名必须由quote字面支持"
-        for index, mention in enumerate(result.mentions)
-        if mention.name not in mention.quote
-    ]
-    if invalid_names:
-        raise ValueError("; ".join(invalid_names))
-    for index, mention in enumerate(result.mentions):
-        if mention.id in ids:
-            raise ValueError(f"mentions[{index}].id: 地点提及ID重复")
-        ids.add(mention.id)
-        cited(mention, f"mentions[{index}]")
+    original_mentions = {item.id: item for item in result.mentions}
+    ids = set()
+    # The single repair must see all citation failures before IDs or evidence change.
+    for field, rows in (
+        ("mentions", result.mentions),
+        ("activities", result.activities),
+        ("evidence", result.evidence),
+    ):
+        for index, row in enumerate(rows):
+            path = f"{field}[{index}]"
+            try:
+                cited(row, path)
+            except ValueError as error:
+                errors.append(str(error))
+            if field == "mentions":
+                if row.id in ids:
+                    errors.append(f"{path}.id: 地点提及ID重复")
+                ids.add(row.id)
+                if row.name not in row.quote:
+                    errors.append(f"{path}.name: 地点原名必须由quote字面支持")
+            elif row.mention_id is not None:
+                mention = original_mentions.get(row.mention_id)
+                if mention is None:
+                    errors.append(f"{path}.mention_id: 关联必须属于本次提及")
+                elif field == "activities" and mention.name not in row.quote:
+                    errors.append(f"{path}.quote: 必须支持所属地点原名")
+    if not comment_ids <= {item.source_id for item in result.evidence}:
+        errors.append("evidence: 每条提交评论须显式分类，不能漏掉unknown")
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    renamed = {}
+    for mention in result.mentions:
         if (
             mention.branch_hint
             and not _supports(mention.branch_hint, sources[mention.source_id])
@@ -116,13 +135,8 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
         )
         mention.id = renamed[mention.id]
     mentions = {item.id: item for item in result.mentions}
-    for index, activity in enumerate(result.activities):
-        cited(activity, f"activities[{index}]")
-        if activity.mention_id not in renamed:
-            raise ValueError(f"activities[{index}].mention_id: 活动必须引用当前提及")
+    for activity in result.activities:
         activity.mention_id = renamed[activity.mention_id]
-        if mentions[activity.mention_id].name not in activity.quote:
-            raise ValueError(f"activities[{index}].quote: 必须支持所属地点原名")
         activity.id = str(
             uuid5(
                 NAMESPACE_URL,
@@ -137,13 +151,8 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
             )
         )
     unique, evidence = set(), []
-    for index, item in enumerate(result.evidence):
-        cited(item, f"evidence[{index}]")
+    for item in result.evidence:
         if item.mention_id is not None:
-            if item.mention_id not in renamed:
-                raise ValueError(
-                    f"evidence[{index}].mention_id: 证据关联必须属于本次提及"
-                )
             item.mention_id = renamed[item.mention_id]
         if item.citation_kind == "text":
             if (

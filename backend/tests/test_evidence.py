@@ -168,7 +168,9 @@ def test_unsupported_optional_branch_is_unknown_without_repair():
     result, calls = run([output])
     assert result["status"] == "passed" and len(calls) == 1
     assert result["data"]["mentions"][0]["branch_hint"] is None
-    assert "地点和分店尚待核对" in build_candidates([result], sources())[0]["uncertainty"]
+    assert (
+        "地点和分店尚待核对" in build_candidates([result], sources())[0]["uncertainty"]
+    )
 
 
 def test_name_repair_identifies_all_invalid_mentions():
@@ -181,10 +183,47 @@ def test_name_repair_identifies_all_invalid_mentions():
     assert "mentions[0].name" in repair and "mentions[1].name" in repair
 
 
-@pytest.mark.parametrize("mention_id,omitted_status", [("westlake", False), (None, False), ("westlake", True)])
+def test_single_repair_sees_name_activity_and_evidence_failures_together():
+    bad = extraction()
+    bad["mentions"][0]["name"] = "无依据地点"
+    bad["mentions"].append({**bad["mentions"][0], "id": "other", "name": "另一地点"})
+    bad["activities"][0]["quote"] = "河坊街可以吃饭"
+    bad["evidence"][0]["quote"] = "伪造评论"
+    result, calls = run([bad, extraction()])
+    assert result["status"] == "passed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert all(
+        path in repair
+        for path in (
+            "mentions[0].name",
+            "mentions[1].name",
+            "activities[0].quote",
+            "evidence[0].quote",
+        )
+    )
+
+
+def test_unknown_source_and_activity_link_report_without_key_error():
+    bad = extraction()
+    bad["activities"][0].update(
+        source_id="foreign-source", mention_id="foreign-mention"
+    )
+    result, calls = run([bad, bad])
+    assert result["status"] == "failed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "activities[0].source_id" in repair and "activities[0].mention_id" in repair
+    assert "choices" not in repair
+
+
+@pytest.mark.parametrize(
+    "mention_id,omitted_status",
+    [("westlake", False), (None, False), ("westlake", True)],
+)
 def test_inconsistent_unlinked_evidence_keeps_no_place_vote(mention_id, omitted_status):
     output = extraction()
-    output["evidence"][0].update(mention_id=mention_id, link_status="unlinked" if mention_id else "linked")
+    output["evidence"][0].update(
+        mention_id=mention_id, link_status="unlinked" if mention_id else "linked"
+    )
     if omitted_status:
         output["evidence"][0].pop("link_status")
     result, calls = run([output])
@@ -195,7 +234,11 @@ def test_inconsistent_unlinked_evidence_keeps_no_place_vote(mention_id, omitted_
     else:
         assert item["mention_id"] is None and item["link_status"] == "unlinked"
     candidate = build_candidates([result], sources())[0]
-    assert candidate["stats"]["positive_count"] == candidate["stats"]["negative_count"] == 0
+    assert (
+        candidate["stats"]["positive_count"]
+        == candidate["stats"]["negative_count"]
+        == 0
+    )
 
 
 def test_candidate_reports_source_time_without_claiming_current_validity():
