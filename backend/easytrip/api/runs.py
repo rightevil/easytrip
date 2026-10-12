@@ -34,7 +34,10 @@ def make_router():
 
     @router.get("/runs/{run_id}")
     def get_run(run_id: str, trip_id: UUID, request: Request):
-        return _call(request, "get_run", run_id, str(trip_id))
+        run = _call(request, "get_run", run_id, str(trip_id))
+        if run["kind"] == "discover":
+            run["trip_usage"] = _call(request, "trip_usage", str(trip_id))
+        return run
 
     @router.post("/runs/{run_id}/cancel")
     async def cancel_run(run_id: str, body: RunControl, request: Request):

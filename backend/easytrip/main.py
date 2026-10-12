@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from .agent.discovery import DiscoveryRunner
 from .agent.runner import RunExecutor
 from .api.discovery import make_router as make_discovery_router
 from .api.runs import make_router as make_runs_router
@@ -30,7 +31,7 @@ def create_app(
         database_path
         or (DATA_DIR if export_dir == EXPORT_DIR else export_dir) / "easytrip.sqlite3"
     )
-    executor = RunExecutor(database)
+    executor = RunExecutor(database, discovery=DiscoveryRunner(database, settings))
 
     @asynccontextmanager
     async def lifespan(application):

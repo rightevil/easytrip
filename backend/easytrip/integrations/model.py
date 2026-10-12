@@ -1,5 +1,6 @@
-"""Bounded P0 model extraction; image observations still require human review."""
+"""Bounded structured model calls; image observations still require human review."""
 
+import asyncio
 import json
 import re
 from typing import Annotated, Literal
@@ -12,6 +13,9 @@ from ..config import Settings, validate_url
 
 Nonempty = Annotated[str, Field(min_length=1, pattern=r"\S")]
 TOKEN_BUDGETS = {
+    "understanding": 16384,
+    "evidence_text": 32768,
+    "evidence_multimodal": 32768,
     "text_extraction": 16384,
     "multimodal_extraction": 32768,
     "output_repair": 32768,
@@ -107,18 +111,194 @@ def validate_extraction(
     return result
 
 
-async def extract(
-    client: httpx.AsyncClient, settings: Settings, notes: list[dict]
-) -> dict:
-    """Submit at most three images once, with one text-only output repair attempt."""
-    # shortcut: P0 combines up to five notes; split per note before P2's larger batches.
+async def structured_call(
+    client,
+    settings,
+    *,
+    system,
+    text_input,
+    validator,
+    task_type,
+    content=None,
+    images_submitted=0,
+    submitted_images=None,
+    before_request=None,
+    after_request=None,
+):
+    """One bounded JSON call, with one text-only repair and a per-call usage ledger."""
+    if client.trust_env:
+        raise ValueError("模型 HTTP 客户端必须忽略系统代理")
     if not all((settings.model_base_url, settings.model_api_key, settings.model_id)):
         raise ValueError("模型配置不完整：需要 URL、API Key 和模型 ID")
     validate_url(settings.model_base_url)
     endpoint = settings.model_base_url.rstrip("/")
     if not urlsplit(endpoint).path.endswith("/chat/completions"):
         endpoint += "/chat/completions"
+    if task_type not in TOKEN_BUDGETS or not 0 <= images_submitted <= 3:
+        raise ValueError("不支持的模型任务或图片预算")
+    image_context = submitted_images or []
+    if image_context and len(image_context) != images_submitted:
+        raise ValueError("实际图片列表与数量不一致")
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": content if content is not None else text_input},
+    ]
+    usage, requests, error_summary = {}, [], ""
+    data = None
+    for attempt in range(1, 3):
+        current_type = "output_repair" if attempt == 2 else task_type
+        info = {
+            "task_type": current_type,
+            "max_tokens": TOKEN_BUDGETS[current_type],
+            "images_submitted": images_submitted if attempt == 1 else 0,
+            "submitted_images": image_context if attempt == 1 else [],
+        }
+        action_id = await before_request(info) if before_request else None
+        if action_id is False:
+            error_summary = "request_not_allowed"
+            break
+        record = {
+            **info,
+            "thinking_enabled": True,
+            "usage_complete": False,
+            "status": "unknown",
+            "result_unknown": True,
+            "cost_cny": None,
+        }
+        requests.append(record)
+        output = ""
+        network_failed = False
+        try:
+            response = await client.post(
+                endpoint,
+                timeout=httpx.Timeout(40, read=300),
+                headers={"Authorization": f"Bearer {settings.model_api_key}"},
+                json={
+                    "model": settings.model_id,
+                    "max_tokens": TOKEN_BUDGETS[current_type],
+                    "chat_template_kwargs": {"enable_thinking": True},
+                    "messages": messages,
+                    "stream": False,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            call_usage = payload.get("usage") if isinstance(payload, dict) else None
+            counts = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                count = call_usage.get(key) if isinstance(call_usage, dict) else None
+                if type(count) is int and count >= 0:
+                    counts[key] = count
+                    usage[key] = usage.get(key, 0) + count
+            record["usage_complete"] = len(counts) == 3
+            record["usage"] = counts
+            record["result_unknown"] = False
+            details = (
+                call_usage.get("completion_tokens_details")
+                if isinstance(call_usage, dict)
+                else None
+            )
+            reasoning_tokens = (
+                details.get("reasoning_tokens") if isinstance(details, dict) else None
+            )
+            if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+                record["reasoning_tokens"] = reasoning_tokens
+                usage["reasoning_tokens"] = (
+                    usage.get("reasoning_tokens", 0) + reasoning_tokens
+                )
+            choice = payload["choices"][0]
+            if not isinstance(choice, dict) or not isinstance(
+                choice.get("message"), dict
+            ):
+                raise TypeError("模型响应 choice/message 必须为对象")
+            reason = choice.get("finish_reason")
+            record["finish_reason"] = (
+                settings.redact(reason)
+                if isinstance(reason, str) and len(reason) <= 100
+                else None
+            )
+            record["reasoning_returned"] = bool(
+                choice["message"].get("reasoning_content")
+            )
+            output = choice["message"]["content"]
+            if not isinstance(output, str):
+                raise TypeError("模型响应 content 必须为 JSON 字符串")
+            result = validator(output)
+            data = (
+                result.model_dump(mode="json")
+                if isinstance(result, BaseModel)
+                else result
+            )
+            record["status"] = "passed"
+        except asyncio.CancelledError:
+            record["error"] = "CancelledError"
+            raise
+        except httpx.HTTPError as error:
+            error_summary = type(error).__name__
+            record.update(status="failed", error=error_summary)
+            if isinstance(error, httpx.HTTPStatusError):
+                record["http_status"] = error.response.status_code
+            network_failed = True
+        except (ValidationError, ValueError, KeyError, IndexError, TypeError) as error:
+            if isinstance(error, ValidationError):
+                error_summary = "; ".join(
+                    f"{'.'.join(map(str, item['loc']))}: {item['type']}"
+                    for item in error.errors(include_input=False)
+                )
+            elif isinstance(error, (KeyError, IndexError, TypeError)):
+                error_summary = "模型响应缺少 choices[0].message.content"
+            else:
+                error_summary = settings.redact(str(error))
+            record.update(status="failed", error=error_summary)
+        finally:
+            if after_request:
+                metadata = dict(record)
+                metadata["image_context"] = image_context
+                if data is not None:
+                    metadata["model_data"] = data
+                await asyncio.shield(after_request(action_id, metadata))
+        if data is not None or network_failed:
+            break
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": text_input},
+            {"role": "assistant", "content": settings.redact(output)},
+            {
+                "role": "user",
+                "content": "校验未通过："
+                + error_summary
+                + "。只修正结构、来源或证据错误后重新输出 JSON；可保留先前提交图片的观察，不新增图片观察。",
+            },
+        ]
+    response = {
+        "status": "passed" if data is not None else "failed",
+        "data": data,
+        "usage": usage,
+        "usage_complete": bool(requests)
+        and all(item["usage_complete"] for item in requests),
+        "requests": requests,
+        "images_submitted": sum(item["images_submitted"] for item in requests),
+        "submitted_images": [
+            reference for item in requests for reference in item["submitted_images"]
+        ],
+        "model_id": settings.model_id,
+        "attempts": len(requests),
+        "cost_cny": None,
+    }
+    if data is None:
+        response["error"] = error_summary
+    return response
 
+
+async def extract(
+    client: httpx.AsyncClient, settings: Settings, notes: list[dict]
+) -> dict:
+    """Submit at most three images once, with one text-only output repair attempt."""
+    # P0 batch compatibility; P2 services submit each note with its own source context.
+    if not all((settings.model_base_url, settings.model_api_key, settings.model_id)):
+        raise ValueError("模型配置不完整：需要 URL、API Key 和模型 ID")
+    validate_url(settings.model_base_url)
     sources, comment_sources, submitted = {}, set(), []
     text_notes = []
     for note in notes:
@@ -178,140 +358,26 @@ async def extract(
                 {"type": "image_url", "image_url": {"url": url}},
             ]
         )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": content},
-    ]
-    usage, requests = {}, []
-    summary = ""
-    for attempt in range(1, 3):
-        task_type = (
-            "output_repair"
-            if attempt == 2
-            else "multimodal_extraction"
-            if submitted
-            else "text_extraction"
-        )
-        request_record = {
-            "task_type": task_type,
-            "max_tokens": TOKEN_BUDGETS[task_type],
-            "thinking_enabled": True,
-            "usage_complete": False,
-        }
-        requests.append(request_record)
-        try:
-            response = await client.post(
-                endpoint,
-                timeout=httpx.Timeout(40, read=300),
-                headers={"Authorization": f"Bearer {settings.model_api_key}"},
-                json={
-                    "model": settings.model_id,
-                    "max_tokens": TOKEN_BUDGETS[task_type],
-                    "chat_template_kwargs": {"enable_thinking": True},
-                    "messages": messages,
-                    "stream": False,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as error:
-            summary = type(error).__name__
-            request_record["error"] = summary
-            if isinstance(error, httpx.HTTPStatusError):
-                request_record["http_status"] = error.response.status_code
-            # A timeout can occur after charging; retain known usage without retrying.
-            break
-        output = ""
-        try:
-            payload = response.json()
-            call_usage = payload.get("usage") if isinstance(payload, dict) else None
-            counts = {}
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                count = call_usage.get(key) if isinstance(call_usage, dict) else None
-                if type(count) is int and count >= 0:
-                    counts[key] = count
-                    usage[key] = usage.get(key, 0) + count
-            request_record["usage_complete"] = len(counts) == 3
-            request_record["usage"] = counts
-            details = (
-                call_usage.get("completion_tokens_details")
-                if isinstance(call_usage, dict)
-                else None
-            )
-            reasoning_tokens = (
-                details.get("reasoning_tokens") if isinstance(details, dict) else None
-            )
-            if type(reasoning_tokens) is int and reasoning_tokens >= 0:
-                request_record["reasoning_tokens"] = reasoning_tokens
-                usage["reasoning_tokens"] = (
-                    usage.get("reasoning_tokens", 0) + reasoning_tokens
-                )
-            choice = payload["choices"][0]
-            if not isinstance(choice, dict) or not isinstance(
-                choice.get("message"), dict
-            ):
-                raise TypeError("模型响应 choice/message 必须为对象")
-            request_record["finish_reason"] = choice.get("finish_reason")
-            request_record["reasoning_returned"] = bool(
-                choice["message"].get("reasoning_content")
-            )
-            output = choice["message"]["content"]
-            if not isinstance(output, str):
-                raise TypeError("模型响应 content 必须为 JSON 字符串")
-            result = validate_extraction(
-                output,
-                sources,
-                comment_sources,
-                {(source_id, index) for source_id, index, _ in submitted},
-            )
-            return {
-                "status": "passed",
-                "extraction": result.model_dump(),
-                "unclassified_comment_ids": sorted(
-                    comment_sources - {comment.source_id for comment in result.comments}
-                ),
-                "usage": usage,
-                "usage_complete": all(item["usage_complete"] for item in requests),
-                "requests": requests,
-                "images_submitted": len(submitted),
-                "model_id": settings.model_id,
-                "attempts": attempt,
-            }
-        except (ValidationError, ValueError, KeyError, IndexError, TypeError) as error:
-            if isinstance(error, ValidationError):
-                summary = "; ".join(
-                    f"{'.'.join(map(str, item['loc']))}: {item['type']}"
-                    for item in error.errors(include_input=False)
-                )
-            elif isinstance(error, (KeyError, IndexError, TypeError)):
-                summary = "模型响应缺少 choices[0].message.content"
-            else:
-                summary = str(error)
-            # Image requests are not repeated merely to repair JSON formatting.
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": text_input},
-                {
-                    "role": "assistant",
-                    "content": settings.redact(output)
-                    if isinstance(output, str)
-                    else "{}",
-                },
-                {
-                    "role": "user",
-                    "content": "校验未通过："
-                    + summary
-                    + "。只修正结构、来源或证据错误后重新输出 JSON；可保留先前提交图片的观察，不新增图片观察。",
-                },
-            ]
-    return {
-        "status": "failed",
-        "extraction": None,
-        "usage": usage,
-        "usage_complete": all(item["usage_complete"] for item in requests),
-        "requests": requests,
-        "images_submitted": len(submitted),
-        "model_id": settings.model_id,
-        "attempts": len(requests),
-        "error": summary,
-    }
+    response = await structured_call(
+        client,
+        settings,
+        system=system,
+        text_input=text_input,
+        content=content,
+        task_type="multimodal_extraction" if submitted else "text_extraction",
+        images_submitted=len(submitted),
+        submitted_images=[
+            {"source_id": source_id, "image_index": index}
+            for source_id, index, _ in submitted
+        ],
+        validator=lambda output: validate_extraction(
+            output,
+            sources,
+            comment_sources,
+            {(source_id, index) for source_id, index, _ in submitted},
+        ),
+    )
+    response["extraction"] = response.pop("data")
+    if response["status"] == "passed":
+        response["unclassified_comment_ids"] = []
+    return response

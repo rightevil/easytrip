@@ -100,14 +100,22 @@ def test_p1_database_migrates_without_losing_data(tmp_path):
     message = db.add_message(
         trip["id"], MessageCreate(operation_id=uuid4(), content="想去散步")
     )
-    run = running(db, trip)
+    run = db.enqueue_run(
+        trip["id"], CreateRun(operation_id=uuid4(), expected_version=1)
+    )
+    # Seed a running P1 row without calling methods that require the new schema.
+    with db.connection(write=True) as connection:
+        connection.execute(
+            "UPDATE runs SET status='running',generation=1 WHERE id=?", (run["id"],)
+        )
+    run = db.get_run(run["id"])
     before = db.get_trip(trip["id"])
     db.initialize()
     assert db.get_trip(trip["id"]) == before
     assert db.get_trip(trip["id"])["messages"][0] == message
     assert db.get_run(run["id"])["generation"] == run["generation"]
     with db.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -674,3 +682,69 @@ def test_reading_malformed_saved_payload_fails_without_reset(database):
             == bad
         )
     assert database.get_trip(trip["id"])["name"] == trip["name"]
+
+
+def test_candidate_without_reviews_keeps_unique_original_run_sources(database):
+    trip = create(database)
+    run = running(database, trip)
+    source = note(database, trip, run, author_key="a" * 64)
+    first = PlaceMention(
+        id="first", source_id=source["id"], name="西湖", category="play", quote="西湖"
+    )
+    second = first.model_copy(update={"id": "second", "quote": "西湖散步"})
+    candidate = CandidateDraft(
+        name="西湖", category="play", mention_ids=[first.id, second.id]
+    )
+    save(database, trip, run, mentions=[first, second], candidates=[candidate])
+    assert database.candidate_evidence(trip["id"], candidate.id) == []
+    newer = running(database, trip)
+    database.save_source(
+        trip["id"],
+        newer["id"],
+        newer["generation"],
+        SourceNote(external_id="note-1", text="新的正文"),
+    )
+    sources = database.candidate_sources(trip["id"], candidate.id)
+    assert len(sources) == 1 and sources[0]["text"] == source["text"]
+    assert sources[0]["run_id"] == run["id"]
+    assert "author_key" not in sources[0] and "handles" not in sources[0]
+    with pytest.raises(NotFound):
+        database.candidate_sources(create(database)["id"], candidate.id)
+
+
+def test_image_empty_slot_cannot_be_claimed_as_actual_submission(database):
+    trip = create(database)
+    run = running(database, trip)
+    source = note(database, trip, run, images=["", "https://sns.xhscdn.com/second.jpg"])
+    with pytest.raises(ValueError, match="实际提交图片"):
+        save(
+            database,
+            trip,
+            run,
+            image_observations=[
+                ImageObservation(
+                    source_id=source["id"], image_index=1, text="不能分析空图片"
+                )
+            ],
+            submitted_images=[{"source_id": source["id"], "image_index": 1}],
+        )
+
+
+def test_damaged_candidate_mention_reference_fails_without_silent_source_loss(database):
+    trip = create(database)
+    run = running(database, trip)
+    source = note(database, trip, run)
+    mention, _, candidate = extraction(source)
+    candidate = candidate.model_copy(update={"evidence_ids": []})
+    save(database, trip, run, mentions=[mention], candidates=[candidate])
+    with database.connection(write=True) as connection:
+        connection.execute(
+            "DELETE FROM place_mentions WHERE run_id=? AND id=?",
+            (run["id"], mention.id),
+        )
+    with pytest.raises(sqlite3.DatabaseError):
+        database.candidate_sources(trip["id"], candidate.id)
+    assert (
+        database.get_source(trip["id"], source["id"], run["id"])["text"]
+        == source["text"]
+    )

@@ -46,7 +46,10 @@ def test_candidates_sources_and_evidence_are_owned_and_have_no_coordinates(saved
     assert payload["total"] == 1 and payload["items"][0]["match_status"] == "unmatched"
     assert not {"coordinates", "poi_id", "location"}.intersection(payload["items"][0])
     assert client.get(f"/api/trips/{other['id']}/candidates", params={"run_id": run["id"]}).status_code == 404
-    assert client.get(f"/api/trips/{trip['id']}/candidates/{candidate.id}/evidence").status_code == 200
+    cited = client.get(f"/api/trips/{trip['id']}/candidates/{candidate.id}/evidence")
+    assert cited.status_code == 200
+    assert [row["id"] for row in cited.json()["sources"]] == [note["id"]]
+    assert "author_key" not in cited.json()["sources"][0]
     assert client.get(f"/api/trips/{other['id']}/candidates/{candidate.id}/evidence").status_code == 404
     source = client.get(f"/api/trips/{trip['id']}/sources/{comment['id']}", params={"run_id": run["id"]})
     assert source.status_code == 200 and source.json()["parent_source_id"] == note["id"]

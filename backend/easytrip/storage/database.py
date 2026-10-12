@@ -8,6 +8,13 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from ..domain.discovery_tasks import (
+    DISCOVERY_STAGES,
+    DiscoveryBudget,
+    DiscoveryCheckpoint,
+    DiscoverySnapshot,
+    DiscoveryUsage,
+)
 from ..domain.models import (
     ArchiveTrip,
     CreateTrip,
@@ -26,7 +33,9 @@ from ..domain.tasks import (
     RunSnapshot,
     RunUsage,
 )
+from .actions import ActionStore
 from .discovery import DiscoveryStore
+from .discovery_runs import DiscoveryRunStore
 
 
 class NotFound(Exception):
@@ -56,7 +65,7 @@ def encode(value):
     )
 
 
-class Database(DiscoveryStore):
+class Database(DiscoveryStore, ActionStore, DiscoveryRunStore):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -111,6 +120,9 @@ class Database(DiscoveryStore):
             )
             connection.execute("SELECT source_id,run_id,snapshot_json FROM source_snapshots LIMIT 0")
             connection.execute("SELECT id,trip_id,request_version,payload_json FROM candidates LIMIT 0")
+            connection.execute("SELECT id,run_id,action_key FROM run_actions LIMIT 0")
+            connection.execute("SELECT discovery_run_id FROM messages LIMIT 0")
+            connection.execute("SELECT stage_started_at FROM runs LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):
@@ -156,6 +168,7 @@ class Database(DiscoveryStore):
             raw = result.pop(key + "_json")
             result[key] = json.loads(raw) if raw is not None else None
         result.pop("operation_id")
+        result.pop("stage_started_at", None)
         return result
 
     def _detail(self, connection, row):
@@ -259,41 +272,29 @@ class Database(DiscoveryStore):
 
     def add_message(self, trip_id, body: MessageCreate):
         with self.connection(write=True) as connection:
-            row = self._row(connection, trip_id)
-            self._editable(row)
-            previous = connection.execute(
-                "SELECT * FROM messages WHERE trip_id=? AND operation_id=?",
-                (trip_id, str(body.operation_id)),
-            ).fetchone()
-            if previous is not None:
-                if previous["content"] != body.content:
-                    raise OperationConflict("操作ID已用于不同的消息")
-                message = dict(previous)
-            else:
-                message = {
-                    "id": str(uuid4()),
-                    "trip_id": trip_id,
-                    "role": "user",
-                    "content": body.content,
-                    "status": "pending",
-                    "created_at": now(),
-                }
-                connection.execute(
-                    "INSERT INTO messages (id, trip_id, operation_id, content, created_at) VALUES (?,?,?,?,?)",
-                    (
-                        message["id"],
-                        trip_id,
-                        str(body.operation_id),
-                        body.content,
-                        message["created_at"],
-                    ),
-                )
-                connection.execute(
-                    "UPDATE trips SET updated_at=? WHERE id=?",
-                    (message["created_at"], trip_id),
-                )
-            message.pop("operation_id", None)
-            return message
+            return self._add_message(connection, trip_id, body)
+
+    def _add_message(self, connection, trip_id, body):
+        row = self._row(connection, trip_id)
+        self._editable(row)
+        previous = connection.execute(
+            "SELECT * FROM messages WHERE trip_id=? AND operation_id=?",
+            (trip_id, str(body.operation_id)),
+        ).fetchone()
+        if previous is not None:
+            if previous["content"] != body.content:
+                raise OperationConflict("操作ID已用于不同的消息")
+            message = dict(previous)
+        else:
+            message = {"id": str(uuid4()), "trip_id": trip_id, "role": "user", "content": body.content, "status": "pending", "created_at": now()}
+            connection.execute(
+                "INSERT INTO messages (id, trip_id, operation_id, content, created_at) VALUES (?,?,?,?,?)",
+                (message["id"], trip_id, str(body.operation_id), body.content, message["created_at"]),
+            )
+            connection.execute("UPDATE trips SET updated_at=? WHERE id=?", (message["created_at"], trip_id))
+        message.pop("operation_id", None)
+        message.pop("discovery_run_id", None)
+        return message
 
     def archive_trip(self, trip_id, body: ArchiveTrip):
         with self.connection(write=True) as connection:
@@ -306,8 +307,11 @@ class Database(DiscoveryStore):
                     (status, now(), trip_id),
                 )
                 if body.archived:
+                    for active in connection.execute("SELECT * FROM runs WHERE trip_id=? AND status IN ('pending','running','paused','recoverable')", (trip_id,)).fetchall():
+                        usage = self._interrupt_actions(connection, active["id"], self._elapsed_usage(active))
+                        connection.execute("UPDATE runs SET usage_json=? WHERE id=?", (encode(usage), active["id"]))
                     connection.execute(
-                        "UPDATE runs SET status='cancelled', generation=generation+1, stop_reason='trip_archived', updated_at=? WHERE trip_id=? AND status IN ('pending','running','recoverable')",
+                        "UPDATE runs SET status='cancelled', generation=generation+1, stop_reason='trip_archived', stage_started_at=NULL, updated_at=? WHERE trip_id=? AND status IN ('pending','running','paused','recoverable')",
                         (now(), trip_id),
                     )
             return self._detail(connection, self._row(connection, trip_id))
@@ -331,7 +335,9 @@ class Database(DiscoveryStore):
 
     def enqueue_run(self, trip_id, body: CreateRun):
         body = CreateRun.model_validate(body)
-        operation = body.model_dump(mode="json", exclude={"operation_id"})
+        if body.kind == "discover":
+            return self.enqueue_discovery(trip_id, body)
+        operation = body.model_dump(mode="json", exclude={"operation_id"}, exclude_none=True)
         with self.connection(write=True) as connection:
             trip = self._row(connection, trip_id)
             self._editable(trip)
@@ -376,7 +382,7 @@ class Database(DiscoveryStore):
         usage = json.loads(row["usage_json"])
         if row["status"] == "running":
             usage["elapsed_seconds"] += max(
-                0, (datetime.now(timezone.utc) - datetime.fromisoformat(row["updated_at"])).total_seconds()
+                0, (datetime.now(timezone.utc) - datetime.fromisoformat(row["stage_started_at"] or row["updated_at"])).total_seconds()
             )
         return usage
 
@@ -386,8 +392,9 @@ class Database(DiscoveryStore):
                 usage = self._elapsed_usage(row) if graceful else json.loads(row["usage_json"])
                 if not graceful and row["status"] == "running":
                     usage["interrupted_stage_time_unknown"] = True
+                usage = self._interrupt_actions(connection, row["id"], usage)
                 connection.execute(
-                    "UPDATE runs SET status='recoverable',generation=generation+1,stop_reason='app_restarted',usage_json=?,updated_at=? WHERE id=?",
+                    "UPDATE runs SET status='recoverable',generation=generation+1,stop_reason='app_restarted',usage_json=?,stage_started_at=NULL,updated_at=? WHERE id=?",
                     (encode(usage), now(), row["id"]),
                 )
 
@@ -401,11 +408,23 @@ class Database(DiscoveryStore):
                     return None
                 try:
                     run = self._run(row)
-                    RunSnapshot.model_validate(run["params"])
-                    RunBudget.model_validate(run["budget"])
-                    checkpoint = RunCheckpoint.model_validate(run["checkpoint"])
-                    usage = RunUsage.model_validate(run["usage"])
-                    if usage.steps != len(checkpoint.completed_stages) or row["stage"] != STAGES[len(checkpoint.completed_stages)] or row["kind"] != "prepare_workspace":
+                    if row["kind"] == "discover":
+                        DiscoverySnapshot.model_validate(run["params"])
+                        DiscoveryBudget.model_validate(run["budget"])
+                        checkpoint = DiscoveryCheckpoint.model_validate(run["checkpoint"])
+                        DiscoveryUsage.model_validate(run["usage"])
+                        stages = DISCOVERY_STAGES
+                    elif row["kind"] == "prepare_workspace":
+                        RunSnapshot.model_validate(run["params"])
+                        RunBudget.model_validate(run["budget"])
+                        checkpoint = RunCheckpoint.model_validate(run["checkpoint"])
+                        usage = RunUsage.model_validate(run["usage"])
+                        if usage.steps != len(checkpoint.completed_stages):
+                            raise ValueError("无效准备任务步骤")
+                        stages = STAGES
+                    else:
+                        raise ValueError("无效任务类型")
+                    if row["stage"] != stages[len(checkpoint.completed_stages)]:
                         raise ValueError("无效任务阶段")
                 except (ValueError, KeyError, TypeError, IndexError, ValidationError):
                     connection.execute(
@@ -423,8 +442,8 @@ class Database(DiscoveryStore):
                     )
                     continue
                 connection.execute(
-                    "UPDATE runs SET status='running',generation=generation+1,updated_at=? WHERE id=?",
-                    (now(), row["id"]),
+                    "UPDATE runs SET status='running',generation=generation+1,stage_started_at=?,updated_at=? WHERE id=?",
+                    (now(), now(), row["id"]),
                 )
                 return self._run(self._run_row(connection, row["id"]))
 
@@ -436,8 +455,8 @@ class Database(DiscoveryStore):
             status = "cancelled" if trip["status"] == "archived" else "stale"
             reason = "trip_archived" if status == "cancelled" else "request_changed"
             connection.execute(
-                "UPDATE runs SET status=?,generation=generation+1,stop_reason=?,updated_at=? WHERE id=?",
-                (status, reason, now(), row["id"]),
+                "UPDATE runs SET status=?,generation=generation+1,stop_reason=?,usage_json=?,stage_started_at=NULL,updated_at=? WHERE id=?",
+                (status, reason, encode(self._interrupt_actions(connection, row["id"], self._elapsed_usage(row))), now(), row["id"]),
             )
             return False
         return True
@@ -479,15 +498,15 @@ class Database(DiscoveryStore):
             usage["elapsed_seconds"] += elapsed_seconds
             done = len(completed) == len(STAGES)
             connection.execute(
-                "UPDATE runs SET checkpoint_json=?,usage_json=?,status=?,stage=?,result_json=?,error_code=NULL,stop_reason=NULL,updated_at=? WHERE id=?",
+                "UPDATE runs SET checkpoint_json=?,usage_json=?,status=?,stage=?,result_json=?,error_code=NULL,stop_reason=NULL,stage_started_at=?,updated_at=? WHERE id=?",
                 (encode(checkpoint), encode(usage), "completed" if done else "running",
                  "done" if done else STAGES[len(completed)], encode(output) if done else None,
-                 now(), run_id),
+                 None if done else now(), now(), run_id),
             )
             return True
 
     def stop_run(self, run_id, generation, status, reason, *, elapsed_seconds=0.0):
-        if status not in ("partial", "failed") or not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+        if status not in ("partial", "failed", "paused") or not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
             raise ValueError("无效停止状态")
         with self.connection(write=True) as connection:
             try:
@@ -499,7 +518,7 @@ class Database(DiscoveryStore):
             usage = json.loads(row["usage_json"])
             usage["elapsed_seconds"] += elapsed_seconds
             connection.execute(
-                "UPDATE runs SET status=?,stop_reason=?,error_code=?,usage_json=?,updated_at=? WHERE id=?",
+                "UPDATE runs SET status=?,stop_reason=?,error_code=?,usage_json=?,stage_started_at=NULL,updated_at=? WHERE id=?",
                 (status, reason, reason if status == "failed" else None, encode(usage), now(), run_id),
             )
             return True
@@ -510,9 +529,10 @@ class Database(DiscoveryStore):
             if row["generation"] != generation:
                 raise OperationConflict("任务已更新，请重新读取")
             if row["status"] not in ("completed", "stale", "cancelled"):
+                usage = self._interrupt_actions(connection, run_id, self._elapsed_usage(row))
                 connection.execute(
-                    "UPDATE runs SET status='cancelled',generation=generation+1,stop_reason='user_cancelled',usage_json=?,updated_at=? WHERE id=?",
-                    (encode(self._elapsed_usage(row)), now(), run_id),
+                    "UPDATE runs SET status='cancelled',generation=generation+1,stop_reason='user_cancelled',usage_json=?,stage_started_at=NULL,updated_at=? WHERE id=?",
+                    (encode(usage), now(), run_id),
                 )
             return self._run(self._run_row(connection, run_id))
 
@@ -522,13 +542,22 @@ class Database(DiscoveryStore):
             trip = self._row(connection, trip_id)
             self._editable(trip)
             self._version(trip, row["request_version"])
-            if row["generation"] != generation or row["status"] not in ("recoverable", "cancelled", "partial", "failed"):
+            if row["generation"] != generation or row["status"] not in ("recoverable", "cancelled", "partial", "failed", "paused"):
                 raise OperationConflict("任务已更新或不能继续")
             if row["error_code"] == "invalid_run_data":
                 raise OperationConflict("任务数据不完整，请新建准备任务")
             usage, budget = json.loads(row["usage_json"]), json.loads(row["budget_json"])
+            stages = DISCOVERY_STAGES if row["kind"] == "discover" else STAGES
+            if len(json.loads(row["checkpoint_json"])["completed_stages"]) == len(stages):
+                raise OperationConflict("本轮已结束，请新建任务继续")
             if row["stop_reason"] in ("step_budget_exhausted", "time_budget_exhausted") or usage["steps"] >= budget["max_steps"] or usage["elapsed_seconds"] >= budget["max_seconds"]:
                 raise OperationConflict("本轮预算已耗尽，请新建准备任务")
+            if row["kind"] == "discover" and (
+                usage.get("model_calls", 0) >= budget["max_model_calls"]
+                or usage.get("model_tokens", 0) + usage.get("reserved_tokens", 0)
+                >= budget["max_tokens"]
+            ):
+                raise OperationConflict("本轮模型预算已耗尽，请新建任务")
             connection.execute(
                 "UPDATE runs SET status='pending',generation=generation+1,error_code=NULL,stop_reason=NULL,updated_at=? WHERE id=?",
                 (now(), run_id),

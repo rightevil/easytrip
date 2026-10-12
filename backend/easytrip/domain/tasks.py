@@ -3,6 +3,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from .discovery_tasks import DiscoveryBudget
 from .models import Model, TripRequest, Version, Workspace
 
 
@@ -14,8 +15,23 @@ class RunBudget(Model):
 class CreateRun(Model):
     operation_id: UUID
     expected_version: Version
-    kind: Literal["prepare_workspace"] = "prepare_workspace"
-    budget: RunBudget = Field(default_factory=RunBudget)
+    kind: Literal["prepare_workspace", "discover"] = "prepare_workspace"
+    budget: RunBudget | DiscoveryBudget = Field(default_factory=RunBudget)
+    parent_run_id: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def task_budget(cls, value):
+        if isinstance(value, dict):
+            value = dict(value)
+            budget_type = DiscoveryBudget if value.get("kind") == "discover" else RunBudget
+            budget = value.get("budget", {})
+            value["budget"] = budget_type.model_validate(
+                budget.model_dump() if isinstance(budget, (RunBudget, DiscoveryBudget)) else budget
+            )
+            if value.get("kind", "prepare_workspace") != "discover" and value.get("parent_run_id"):
+                raise ValueError("本地准备任务不接受继续探索来源")
+        return value
 
 
 class RunControl(Model):

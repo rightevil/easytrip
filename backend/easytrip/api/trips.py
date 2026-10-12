@@ -1,5 +1,6 @@
 """Trip persistence API; planning and external calls belong to later stages."""
 
+import asyncio
 import json
 import sqlite3
 from typing import Annotated
@@ -7,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 
+from ..domain.discovery_tasks import DiscoveryMessageCreate
 from ..domain.models import (
     ArchiveTrip,
     CreateTrip,
@@ -80,7 +82,7 @@ def make_router() -> APIRouter:
         return _call(request, "save_workspace", trip_id, body)
 
     @router.post("/{trip_id}/messages", status_code=201)
-    def add_message(trip_id: str, body: MessageCreate, request: Request):
+    async def add_message(trip_id: str, body: MessageCreate | DiscoveryMessageCreate, request: Request):
         settings = getattr(request.app.state, "settings", None)
         if settings is None:
             raise HTTPException(
@@ -90,7 +92,13 @@ def make_router() -> APIRouter:
         for secret in sorted(settings.secrets, key=len, reverse=True):
             if secret:
                 content = content.replace(secret, "[REDACTED]")
-        return _call(request, "add_message", trip_id, body.model_copy(update={"content": content}))
+        method = "add_discovery_message" if isinstance(body, DiscoveryMessageCreate) and body.start_discovery else "add_message"
+        if method == "add_discovery_message" and getattr(request.app.state, "executor", None) is None:
+            raise HTTPException(503, detail={"code": "executor_unavailable", "message": "发现任务暂不可用，消息尚未保存"})
+        result = await asyncio.to_thread(_call, request, method, trip_id, body.model_copy(update={"content": content}))
+        if method == "add_discovery_message":
+            request.app.state.executor.wake()
+        return result
 
     @router.post("/{trip_id}/archive")
     def archive_trip(trip_id: str, body: ArchiveTrip, request: Request):

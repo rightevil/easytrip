@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -304,6 +305,7 @@ class DiscoveryStore:
                     or source["kind"] != "note"
                     or source["read_status"] != "success"
                     or image_index > len(source["images"])
+                    or not source["images"][image_index - 1]
                 ):
                     raise ValueError("实际提交图片不属于本轮可读取笔记")
             for item in observations:
@@ -498,6 +500,35 @@ class DiscoveryStore:
                 "limit": limit,
                 "offset": offset,
             }
+
+    def candidate_sources(self, trip_id, candidate_id):
+        from .database import NotFound
+
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM candidates WHERE id=? AND trip_id=?",
+                (candidate_id, trip_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound()
+            candidate = CandidateDraft.model_validate_json(row["payload_json"])
+            result, seen = [], set()
+            for mention_id in candidate.mention_ids:
+                mention_row = connection.execute(
+                    "SELECT * FROM place_mentions WHERE run_id=? AND trip_id=? AND id=?",
+                    (row["run_id"], trip_id, mention_id),
+                ).fetchone()
+                if mention_row is None:
+                    raise sqlite3.DatabaseError("候选提及引用不属于已保存轮次")
+                mention = PlaceMention.model_validate_json(mention_row["payload_json"])
+                if mention.source_id not in seen:
+                    seen.add(mention.source_id)
+                    result.append(
+                        self._source(
+                            connection, trip_id, mention.source_id, row["run_id"]
+                        )
+                    )
+            return result
 
     def candidate_evidence(self, trip_id, candidate_id):
         from .database import NotFound

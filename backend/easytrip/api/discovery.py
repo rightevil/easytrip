@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
 
+from ..domain.discovery_tasks import AdoptDirection
 from .trips import _call
 
 
@@ -28,7 +29,10 @@ def make_router():
 
     @router.get("/{trip_id}/candidates/{candidate_id}/evidence")
     def evidence(trip_id: str, candidate_id: str, request: Request):
-        return {"items": _call(request, "candidate_evidence", trip_id, candidate_id)}
+        return {
+            "items": _call(request, "candidate_evidence", trip_id, candidate_id),
+            "sources": _call(request, "candidate_sources", trip_id, candidate_id),
+        }
 
     @router.get("/{trip_id}/sources/{source_id}")
     def source(trip_id: str, source_id: str, run_id: UUID, request: Request):
@@ -41,5 +45,9 @@ def make_router():
     @router.get("/{trip_id}/gaps")
     def gaps(trip_id: str, request: Request, run_id: UUID | None = None):
         return {"items": _call(request, "list_gaps", trip_id, run_id=str(run_id) if run_id else None)}
+
+    @router.post("/{trip_id}/directions/{candidate_id}/adopt")
+    def adopt_direction(trip_id: str, candidate_id: str, body: AdoptDirection, request: Request):
+        return _call(request, "adopt_direction", trip_id, candidate_id, body)
 
     return router
