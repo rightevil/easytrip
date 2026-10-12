@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+from ..domain.evidence_metrics import object_dimension_judged
 from ..integrations.model import TOKEN_BUDGETS
 from ..integrations.xhs import ToolFailure
 from ..services.collection import CollectionService
@@ -217,12 +218,7 @@ async def analysis_progress(runner, run):
             evidence.add(item["id"])
             if item["source_id"] in comment_ids:
                 comments.add(item["source_id"])
-                if (
-                    item["link_status"] != "uncertain"
-                    and bool(item["object_text"])
-                    and item["nature"] != "unknown"
-                    and item["stance"] != "unknown"
-                ):
+                if object_dimension_judged(item):
                     judged.add(item["source_id"])
         images.update(
             (item["source_id"], item["image_index"])
@@ -252,12 +248,7 @@ async def analysis_progress(runner, run):
         for item in extraction["data"]["evidence"]:
             if item["source_id"] in comment_ids:
                 reused_comments.add(item["source_id"])
-                if (
-                    item["link_status"] != "uncertain"
-                    and bool(item["object_text"])
-                    and item["nature"] != "unknown"
-                    and item["stance"] != "unknown"
-                ):
+                if object_dimension_judged(item):
                     reused_judged.add(item["source_id"])
         reused_images.update(
             (item["source_id"], item["image_index"])

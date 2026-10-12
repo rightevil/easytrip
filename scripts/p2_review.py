@@ -5,8 +5,13 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+
+# The offline CLI shares the metric without importing framework dependencies.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+from easytrip.domain.evidence_metrics import object_dimension_judged  # noqa: E402
 
 MIN_NOTES, MIN_COMMENTS = 20, 100
 CHECKS = ("object_correct", "dimension_correct", "nature_correct", "stance_correct", "quote_correct")
@@ -78,7 +83,7 @@ def load_sample(database, run_id):
     for row in sample:
         row["model"] = {"mentions": mentions[row["source_id"]], "evidence": evidence[row["source_id"]]}
         # Explicit whole-trip judgements need not link to a particular POI.
-        row["model_judged"] = row["kind"] == "comment" and any(item["object_text"] and item["dimension"] and item["link_status"] != "uncertain" and item["nature"] not in (None, "unknown") and item["stance"] not in (None, "unknown") for item in row["model"]["evidence"])
+        row["model_judged"] = row["kind"] == "comment" and any(object_dimension_judged(item) for item in row["model"]["evidence"])
         row["model_poi_linked"] = row["kind"] == "comment" and any(item["link_status"] == "linked" for item in row["model"]["evidence"])
         parent = by_id.get(row["reply_to_source_id"])
         if parent:

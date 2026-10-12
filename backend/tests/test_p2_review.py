@@ -33,7 +33,7 @@ def corpus(tmp_path, *, notes=20, comments_per_note=5, judged=100):
             comment = database.save_source(trip["id"], run["id"], run["generation"], SourceComment(external_id=f"private-comment-{index}-{count}", parent_source_id=note["id"], text="西湖景色好，但西湖排队久。\napi_key=private-api-value", author_key="b" * 64), query="西湖")
             attempted = ordinal < judged
             for dimension, stance, quote in (("景色", "positive", "西湖景色好"), ("排队", "negative", "西湖排队久")):
-                evidence.append(Evidence(id=f"evidence-{ordinal}-{dimension}", source_id=comment["id"], mention_id=mention.id if attempted else None, object_text="西湖", dimension=dimension, nature="experience" if attempted else "unknown", stance=stance if attempted else "unknown", quote=quote, link_status="linked" if attempted else "unlinked", model_id="synthetic-model"))
+                evidence.append(Evidence(id=f"evidence-{ordinal}-{dimension}", source_id=comment["id"], mention_id=mention.id if attempted else None, object_text="西湖" if attempted else "", dimension=dimension, nature="experience" if attempted else "unknown", stance=stance if attempted else "unknown", quote=quote, link_status="linked" if attempted else "unlinked", model_id="synthetic-model"))
             ordinal += 1
         database.save_discovery_batch(trip["id"], run["id"], run["generation"], mentions=[mention], evidence=evidence)
     return database.path, run["id"]
@@ -161,6 +161,45 @@ def test_whole_trip_judgement_does_not_require_a_poi_link(tmp_path):
     comment = next(row for row in rows if row["kind"] == "comment")
     assert comment["model_judged"] is True
     assert comment["model_poi_linked"] is False
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"link_status": "linked", "mention_id": "mention-0"}, True),
+        ({}, True),
+        ({"nature": "question", "stance": "question"}, True),
+        ({"object_text": ""}, False),
+        ({"object_text": "未知对象"}, False),
+        ({"dimension": "unknown"}, False),
+        ({"link_status": "uncertain"}, False),
+        ({"citation_kind": "image", "image_index": 1}, False),
+    ],
+    ids=["neutral-linked", "neutral-unlinked", "question", "empty-object",
+         "unknown-object", "unknown-dimension", "uncertain", "image"],
+)
+def test_review_main_metric_is_independent_of_nature_and_stance(tmp_path, fields, expected):
+    path, run_id = corpus(tmp_path, notes=1, comments_per_note=1, judged=0)
+    with sqlite3.connect(path) as connection:
+        for identity, encoded in connection.execute("SELECT source_id,snapshot_json FROM source_snapshots").fetchall():
+            snapshot = json.loads(encoded)
+            if snapshot["kind"] == "comment":
+                snapshot["text"] = "西湖门票15元。西湖门票免费吗？"
+                connection.execute("UPDATE source_snapshots SET snapshot_json=? WHERE source_id=?", (json.dumps(snapshot), identity))
+        for identity, encoded in connection.execute("SELECT id,payload_json FROM evidence").fetchall():
+            item = json.loads(encoded)
+            item.update(object_text="西湖", dimension="门票费用", nature="unknown", stance="unknown", quote="西湖门票15元", mention_id=None, link_status="unlinked")
+            item.update(fields)
+            if item["nature"] == "question":
+                item["quote"] = "西湖门票免费吗？"
+            connection.execute("UPDATE evidence SET payload_json=? WHERE id=?", (json.dumps(item), identity))
+    rows, _ = review.load_sample(path, run_id)
+    comment = next(row for row in rows if row["kind"] == "comment")
+    assert comment["model_judged"] is expected
+    report = review.score_review(path, run_id, labels_file(tmp_path, human_labels(rows)), tmp_path / "score")
+    assert report["accuracy"]["denominator"] == int(expected)
+    assert report["coverage"] == {"numerator": int(expected), "denominator": 1, "rate": float(expected)}
+    assert report["counts"]["abstained_judgeable"] == int(not expected)
 
 
 def test_bad_label_shapes_and_disguised_machine_reviewers_are_not_human_labels():

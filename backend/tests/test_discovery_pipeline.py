@@ -252,6 +252,74 @@ def test_whole_trip_judgements_count_as_coverage_without_place_votes(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize(
+    "fields, judged",
+    [
+        ({}, 2),
+        ({"object_text": "未知对象"}, 0),
+        ({"dimension": "unknown"}, 0),
+        ({"link_status": "uncertain"}, 0),
+    ],
+    ids=["neutral-and-question", "unknown-object", "unknown-dimension", "uncertain"],
+)
+def test_main_metric_is_consistent_for_new_and_inherited_sources_without_votes(
+    tmp_path, monkeypatch, fields, judged
+):
+    async def check():
+        database, trip, runner, mcp, _ = setup(tmp_path, monkeypatch)
+        responder = mcp.responder
+
+        def fee_comments(name, arguments):
+            if name == "get_feed_detail":
+                return payload(
+                    [comment("fee", "西湖门票15元"), comment("fee-question", "西湖门票免费吗？")],
+                    noteId="play", title="杭州西湖", desc="杭州西湖旅行记录", imageList=[],
+                )
+            return responder(name, arguments)
+
+        mcp.responder = fee_comments
+        extract = content.extract_note
+
+        async def classify_fee_evidence(*args, **kwargs):
+            result = await extract(*args, **kwargs)
+            for row in result["data"]["evidence"]:
+                nature = "question" if "吗" in row["quote"] else "unknown"
+                row.update(dimension="门票费用", nature=nature, stance=nature)
+                row.update(fields)
+            return result
+
+        monkeypatch.setattr(content, "extract_note", classify_fee_evidence)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(operation_id=uuid4(), expected_version=1, kind="discover", budget={"target_notes": 1}),
+        )
+        parent = database.claim_run()
+        await runner.execute(parent)
+        parent_final = database.get_run(parent["id"])
+        assert parent_final["usage"]["comments_analyzed"] == 2
+        assert parent_final["usage"]["comments_judged"] == judged
+        assert parent_final["usage"]["judgement_rows"] == 2
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(operation_id=uuid4(), expected_version=1, kind="discover", parent_run_id=parent["id"], budget={"target_notes": 1}),
+        )
+        child = database.claim_run()
+        await runner.execute(child)
+        final = database.get_run(child["id"])
+        assert final["usage"]["comments_analyzed"] == final["usage"]["comments_judged"] == 0
+        assert final["result"]["coverage"]["comments_reused_analyzed"] == 2
+        assert final["result"]["coverage"]["comments_reused_judged"] == judged
+        assert database.get_run(parent["id"])["usage"]["comments_judged"] == judged
+        for run_id in (parent["id"], child["id"]):
+            candidates = database.list_candidates(trip["id"], run_id)["items"]
+            assert candidates and all(
+                row["stats"]["positive_count"] == row["stats"]["negative_count"] == 0
+                for row in candidates
+            )
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("fail_second", [False, True])
 def test_supplement_is_finite_and_unknown_preserves_prior_drafts(
     tmp_path, monkeypatch, fail_second
