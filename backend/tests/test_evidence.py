@@ -203,6 +203,23 @@ def test_single_repair_sees_name_activity_and_evidence_failures_together():
     )
 
 
+def test_original_emoji_name_and_multiline_quote_cannot_be_normalized_or_joined():
+    sample, valid = note(), extraction()
+    sample["text"] = "青山⛰️步道\n沿路有树林\n适合散步"
+    valid["mentions"][0].update(name="青山", quote="青山⛰️步道")
+    valid["activities"][0]["quote"] = sample["text"]
+    valid["evidence"][0].update(mention_id=None, link_status="unlinked")
+    bad = copy.deepcopy(valid)
+    bad["mentions"][0]["name"] = "青山步道"
+    bad["activities"][0]["quote"] = "青山⛰️步道\n适合散步"
+    result, calls = run([bad, valid], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "mentions[0].name" in repair and '"青山步道"' in repair
+    assert "activities[0].quote" in repair
+    assert result["data"]["activities"][0]["quote"] == sample["text"]
+
+
 def test_unknown_source_and_activity_link_report_without_key_error():
     bad = extraction()
     bad["activities"][0].update(
