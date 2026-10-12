@@ -57,6 +57,29 @@ describe('real workspace behaviors', () => {
     expect(saved.get('one')?.request.destination).toBe('南京');
   });
 
+  it('never archives after failed saving and keeps the local draft', async () => {
+    vi.mocked(api.update).mockRejectedValueOnce(new ApiError('磁盘写失败', 503, 'database_unavailable'));
+    vi.spyOn(api, 'archive').mockResolvedValue({ ...trip('one', '第一份行程'), status: 'archived' });
+    await openApp();
+    fireEvent.change(screen.getByLabelText(/目的地/), { target: { value: '南京未保存' } });
+    await userEvent.click(screen.getByRole('button', { name: '归档' }));
+    await screen.findByRole('heading', { name: '当前编辑还未保存' });
+    expect(screen.queryByRole('button', { name: '保留本地编辑并继续' })).toBeNull();
+    expect(api.archive).not.toHaveBeenCalled();
+    expect((screen.getByLabelText(/目的地/) as HTMLInputElement).value).toBe('南京未保存');
+  });
+
+  it('restores the remembered trip even when it is outside the first page', async () => {
+    const outside = trip('fifty-one', '分页外行程'); saved.set(outside.id, outside);
+    localStorage.setItem('easytrip.active', outside.id);
+    vi.mocked(api.list).mockResolvedValue({ items: [saved.get('one')!, saved.get('two')!], total: 51, offset: 0, limit: 50 });
+    render(<App />);
+    await screen.findByRole('heading', { name: '分页外行程' });
+    expect(api.get).toHaveBeenCalledWith('fifty-one');
+    expect(screen.getByRole('button', { name: /分页外行程/ })).toBeTruthy();
+    expect(api.get).not.toHaveBeenCalledWith('one');
+  });
+
   it('reapplies conflict edits against the latest version without discarding the draft', async () => {
     vi.mocked(api.update).mockRejectedValueOnce(new ApiError('版本冲突', 409, 'version_conflict', 5));
     await openApp();
@@ -113,5 +136,32 @@ describe('real workspace behaviors', () => {
     expect(screen.queryByText('第一份的想法', { selector: '.chat-message p' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
     await screen.findByRole('heading', { name: '第一份行程' });
+  });
+
+  it('returns to the sending trip before its response and updates the current message view exactly once', async () => {
+    const sent = { id: 'late-message', trip_id: 'one', role: 'user', content: '等待响应的想法', status: 'pending', created_at: '2026-10-12T00:00:00Z' };
+    let complete!: (value: typeof sent) => void;
+    vi.spyOn(api, 'message').mockReturnValue(new Promise(resolve => { complete = resolve; }));
+    await openApp();
+    fireEvent.change(screen.getByLabelText('行程想法'), { target: { value: sent.content } });
+    await userEvent.click(screen.getByRole('button', { name: '保存想法' }));
+    await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
+    await screen.findByRole('heading', { name: '第二份行程' });
+    await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
+    await screen.findByRole('heading', { name: '第一份行程' });
+    expect((screen.getByRole('button', { name: '正在保存…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText('行程想法') as HTMLTextAreaElement).disabled).toBe(true);
+    await act(async () => { complete(sent); });
+    await screen.findByText(sent.content, { selector: '.chat-message p' });
+    expect((screen.getByLabelText('行程想法') as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByRole('button', { name: '保存想法' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.message).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText(sent.content, { selector: '.chat-message p' })).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
+    await screen.findByRole('heading', { name: '第二份行程' });
+    await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
+    await screen.findByRole('heading', { name: '第一份行程' });
+    expect(screen.getAllByText(sent.content, { selector: '.chat-message p' })).toHaveLength(1);
+    expect((screen.getByLabelText('行程想法') as HTMLTextAreaElement).value).toBe('');
   });
 });

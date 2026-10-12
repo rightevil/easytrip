@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { api } from './api';
+import { api, ApiError } from './api';
 import type { Trip, TripRequest, TripSummary, Workspace } from './api';
 import type { Autosave, SaveState } from './autosave';
 import { TripSession } from './session';
+import { Runs } from './Runs';
 
 const labels = { saved: '已保存', dirty: '等待保存', saving: '保存中', error: '保存失败', conflict: '发生版本冲突' };
 const transports: [TripRequest['transport'], string][] = [['mixed', '灵活组合'], ['walking', '步行'], ['transit', '公共交通'], ['bicycling', '骑行'], ['electrobike', '电动车'], ['driving', '自驾']];
@@ -27,10 +28,12 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [leave, setLeave] = useState<(() => Promise<void>) | null>(null);
+  const [allowLeave, setAllowLeave] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const sessions = useRef(new Map<string, TripSession>());
   const operation = useRef<string | null>(null);
   const loadSequence = useRef(0);
+  const listOffset = useRef(0);
   const busyRef = useRef(false);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -47,25 +50,32 @@ export function App() {
     return session;
   }, [upsert]);
   const refreshList = useCallback(async (archived = includeArchived, append = false) => {
-    const result = await api.list(archived, append ? items.length : 0);
+    const result = await api.list(archived, append ? listOffset.current : 0);
+    listOffset.current = result.offset + result.items.length;
     setItems(previous => append ? [...previous, ...result.items.filter(item => !previous.some(existing => existing.id === item.id))] : result.items);
     setTotal(result.total);
-  }, [includeArchived, items.length]);
+  }, [includeArchived]);
 
   useEffect(() => {
     let alive = true;
     void api.list().then(async result => {
       if (!alive) return;
-      setItems(result.items); setTotal(result.total);
+      setItems(result.items); setTotal(result.total); listOffset.current = result.offset + result.items.length;
       const remembered = localStorage.getItem('easytrip.active');
-      const initial = result.items.find(item => item.id === remembered) ?? result.items[0];
-      if (initial) {
-        const trip = await api.get(initial.id);
-        if (alive) setActive(makeSession(trip));
+      let restored: Trip | null = null;
+      if (remembered) {
+        try {
+          const trip = await api.get(remembered);
+          if (trip.status !== 'archived') restored = trip;
+        } catch (reason) { if (!(reason instanceof ApiError && reason.status === 404)) throw reason; }
+      }
+      if (!restored && result.items[0]) restored = await api.get(result.items[0].id);
+      if (alive && restored) {
+        upsert(restored); setActive(makeSession(restored));
       }
     }).catch(reason => { if (alive) setError(message(reason)); }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; sessions.current.forEach(session => session.dispose()); };
-  }, [makeSession]);
+  }, [makeSession, upsert]);
   useEffect(() => {
     if (active) localStorage.setItem('easytrip.active', active.trip.id);
     const warn = (event: BeforeUnloadEvent) => {
@@ -83,13 +93,13 @@ export function App() {
     if (cached && !cached.dirty) cached.accept(trip);
     setActive(cached ?? makeSession(trip));
   };
-  const guarded = async (action: () => Promise<void>) => {
+  const guarded = async (action: () => Promise<void>, canRetain = true) => {
     if (busyRef.current) return;
     busyRef.current = true; setBusy(true);
     setError(null);
     const current = activeRef.current;
     try { await current?.flush(); }
-    catch (reason) { setError(message(reason)); setLeave(() => action); busyRef.current = false; setBusy(false); return; }
+    catch (reason) { setError(message(reason)); setAllowLeave(canRetain); setLeave(() => action); busyRef.current = false; setBusy(false); return; }
     try { await action(); }
     catch (reason) { setError(message(reason)); }
     finally { busyRef.current = false; setBusy(false); }
@@ -105,13 +115,13 @@ export function App() {
     const trip = await api.archive(active.trip.id, active.request.getSnapshot().version, active.trip.status !== 'archived');
     active.accept(trip); upsert(trip); setActive(null);
     await refreshList();
-  });
-  const remove = () => guarded(async () => {
+  }, false);
+  const remove = () => { setDeleting(false); void guarded(async () => {
     if (!active) return;
     await api.remove(active.trip.id, active.request.getSnapshot().version);
     active.dispose(); sessions.current.delete(active.trip.id); setActive(null); setDeleting(false);
     localStorage.removeItem('easytrip.active'); await refreshList();
-  });
+  }, false); };
   const resolveLeave = async (saveFirst: boolean) => {
     const action = leave;
     if (!action) return;
@@ -132,7 +142,7 @@ export function App() {
       <label className="archive-filter"><input type="checkbox" checked={includeArchived} onChange={event => {
         const value = event.target.checked;
         setIncludeArchived(value); setLoading(true);
-        void api.list(value).then(result => { setItems(result.items); setTotal(result.total); }).catch(reason => setError(message(reason))).finally(() => setLoading(false));
+        void api.list(value).then(result => { setItems(result.items); setTotal(result.total); listOffset.current = result.offset + result.items.length; }).catch(reason => setError(message(reason))).finally(() => setLoading(false));
       }} />显示归档行程</label>
       <nav className="trip-list" aria-label="选择行程">
         {loading && <p className="muted sidebar-note" role="status">正在读取行程…</p>}
@@ -150,7 +160,7 @@ export function App() {
         <span className="eyebrow">给下一段旅程留一点空间</span><h1>从想去的地方，<br />或一个模糊的想法开始。</h1><p>保存你的出发地、时间和偏好，<br />随时回来继续准备。</p><button className="primary" onClick={create} disabled={busy || loading}>{loading ? '正在打开工作区…' : '创建我的第一份行程'}<span aria-hidden="true">↗</span></button><div className="welcome-orbit" aria-hidden="true"><span>出发</span><i /><b>✳</b></div>
       </div>}
     </main>
-    {leave && <Modal title="当前编辑还未保存" onClose={() => setLeave(null)}><p>本地编辑仍在当前行程中。保存失败或版本冲突需要处理后才能可靠恢复。</p><div className="modal-actions"><button onClick={() => setLeave(null)}>留在当前行程</button><button disabled={busy} onClick={() => { void resolveLeave(false); }}>保留本地编辑并继续</button><button className="primary" disabled={busy} onClick={() => { void resolveLeave(true); }}>重试保存后继续</button></div></Modal>}
+    {leave && <Modal title="当前编辑还未保存" onClose={() => setLeave(null)}><p>{allowLeave ? '本地编辑仍在当前行程中。保存失败或版本冲突需要处理后才能可靠恢复。' : '归档或删除前必须先保存当前编辑。请先处理保存失败或版本冲突，本地编辑仍保留。'}</p><div className="modal-actions"><button onClick={() => setLeave(null)}>留在当前行程</button>{allowLeave && <button disabled={busy} onClick={() => { void resolveLeave(false); }}>保留本地编辑并继续</button>}<button className="primary" disabled={busy} onClick={() => { void resolveLeave(true); }}>重试保存后继续</button></div></Modal>}
     {deleting && active && <Modal title="删除这份行程？" onClose={() => setDeleting(false)}><p>“{active.trip.name}”的条件、对话和任务记录会一并删除，此操作无法撤销。你也可以归档保留它。</p><div className="modal-actions"><button onClick={() => setDeleting(false)}>保留行程</button><button className="danger" disabled={busy} onClick={remove}>确认删除</button></div></Modal>}
   </div>;
 }
@@ -197,7 +207,7 @@ function TripView({ session, archived, onTrip, onArchive, onDelete, busy }: { se
       {workspace.active_tab === 'overview' && <><div className="summary-banner"><span className="eyebrow">下一段旅程</span><h2>{draft.request.destination || '目的地，还可以慢慢想'}</h2><p>{draft.request.origin ? `从${draft.request.origin}出发` : '出发地待补充'}<span> · </span>{draft.request.start_at ? new Date(draft.request.start_at).toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间待定'}</p></div><div className="section-subheading"><h3>候选地点</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><Empty icon="✳" title="把想去的地方，留给下一步" description="候选发现尚未接入。当前可以先保存条件和想法，地点确认后将在这里展示。" /></>}
       {workspace.active_tab === 'map' && <><div className="section-subheading"><h3>地点与地图</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><div className="map-empty"><div className="map-grid" aria-hidden="true" /><Empty icon="⌖" title="地图尚未接入" description="确认地点后，这里会展示本行程的地图和路线。" /></div><MapPreferences workspace={workspace} onChange={value => session.workspace.update(value)} /><a className="text-link" href="/p0/map" target="_blank" rel="noreferrer">打开独立的 P0 地图验证 ↗</a></>}
       {workspace.active_tab === 'plan' && <><div className="section-subheading"><h3>行程时间表</h3><span className="badge">尚未接入</span></div><Empty icon="≋" title="为旅程留一点空白" description="时间安排与方案生成尚未接入。已保存的条件会作为后续规划的起点。" /></>}
-    </div></section><Chat session={session} archived={archived} onTrip={onTrip} /></div></div>
+    </div></section><Chat session={session} archived={archived} /><Runs session={session} requestVersion={requestSave.version} archived={archived} /></div></div>
   </>;
 }
 
@@ -224,26 +234,13 @@ function MapPreferences({ workspace, onChange }: { workspace: Workspace; onChang
   };
   return <details className="map-preferences"><summary>预设地图视野</summary><p className="muted">视野保存在当前行程，待地图接入后使用。</p><form onSubmit={submit}><label>经度<input type="number" min="-180" max="180" step="any" value={longitude} onChange={event => setLongitude(event.target.value)} /></label><label>纬度<input type="number" min="-90" max="90" step="any" value={latitude} onChange={event => setLatitude(event.target.value)} /></label><label>缩放<input required type="number" min="3" max="20" step="0.5" value={zoom} onChange={event => setZoom(event.target.value)} /></label><button type="submit">保存视野</button></form>{error && <p className="inline-error" role="alert">{error}</p>}</details>;
 }
-function Chat({ session, archived, onTrip }: { session: TripSession; archived: boolean; onTrip: (trip: Trip) => void }) {
-  const [content, setContent] = useState(session.composer);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState(session.trip.messages);
-  const send = async (event: FormEvent) => {
+function Chat({ session, archived }: { session: TripSession; archived: boolean }) {
+  const { content, sending, error, messages, retryPending } = useSyncExternalStore(session.subscribeChat, session.getChatSnapshot);
+  const send = (event: FormEvent) => {
     event.preventDefault();
-    if (!content.trim() || sending) return;
-    setSending(true); setError(null);
-    session.messageOperation ??= { id: crypto.randomUUID(), content: content.trim() };
-    try {
-      const saved = await api.message(session.trip.id, session.messageOperation.id, session.messageOperation.content);
-      const next = session.trip.messages.some(item => item.id === saved.id) ? session.trip.messages : [...session.trip.messages, saved];
-      session.trip = { ...session.trip, messages: next };
-      setMessages(next); onTrip(session.trip);
-      session.composer = ''; session.messageOperation = null; setContent('');
-    } catch (reason) { setError(message(reason)); }
-    finally { setSending(false); }
+    void session.sendMessage();
   };
-  return <section className="panel chat" aria-labelledby="chat-title"><div className="panel-heading"><div><span className="section-number">02</span><h2 id="chat-title">把想法记下来</h2></div><span className="badge">解析待接入</span></div><div className="chat-history" aria-label="已保存的对话">{messages.length ? messages.map(item => <article className="chat-message" key={item.id}><div><span>{item.role === 'user' ? '你' : '系统'}</span><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time><span className="message-state">待处理</span></div><p>{item.content}</p></article>) : <p className="chat-empty">想避开人潮，还是只想找个地方发呆？<br />先记下来，后续规划再慢慢展开。</p>}</div><form className="composer" onSubmit={send}><label className="sr-only" htmlFor="message-content">行程想法</label><textarea id="message-content" rows={2} value={content} disabled={archived || sending || Boolean(session.messageOperation)} maxLength={4000} placeholder="记下这次旅行的想法……" onChange={event => { session.composer = event.target.value; setContent(event.target.value); }} /><div><span className="muted">未发送草稿在本次会话中保留，切换行程不会丢失。保存后可重开恢复。</span><button className="primary" type="submit" disabled={archived || sending || !content.trim()}>{sending ? '正在保存…' : error ? '重试保存' : '保存想法'}<span aria-hidden="true">↗</span></button></div></form>{error && <div className="message-error" role="alert"><p>{error} 草稿仍保留。</p><button className="text-button" onClick={() => { session.messageOperation = null; setError(null); }}>继续编辑消息</button></div>}</section>;
+  return <section className="panel chat" aria-labelledby="chat-title"><div className="panel-heading"><div><span className="section-number">02</span><h2 id="chat-title">把想法记下来</h2></div><span className="badge">解析待接入</span></div><div className="chat-history" aria-label="已保存的对话">{messages.length ? messages.map(item => <article className="chat-message" key={item.id}><div><span>{item.role === 'user' ? '你' : '系统'}</span><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time><span className="message-state">待处理</span></div><p>{item.content}</p></article>) : <p className="chat-empty">想避开人潮，还是只想找个地方发呆？<br />先记下来，后续规划再慢慢展开。</p>}</div><form className="composer" onSubmit={send}><label className="sr-only" htmlFor="message-content">行程想法</label><textarea id="message-content" rows={2} value={content} disabled={archived || sending || retryPending} maxLength={4000} placeholder="记下这次旅行的想法……" onChange={event => session.editMessage(event.target.value)} /><div><span className="muted">未发送草稿在本次会话中保留，切换行程不会丢失。保存后可重开恢复。</span><button className="primary" type="submit" disabled={archived || sending || !content.trim()}>{sending ? '正在保存…' : error ? '重试保存' : '保存想法'}<span aria-hidden="true">↗</span></button></div></form>{error && <div className="message-error" role="alert"><p>{error} 草稿仍保留。</p><button className="text-button" onClick={() => session.continueEditingMessage()}>继续编辑消息</button></div>}</section>;
 }
 function Empty({ icon, title, description }: { icon: string; title: string; description: string }) { return <div className="empty-state"><span className="empty-symbol" aria-hidden="true">{icon}</span><h3>{title}</h3><p>{description}</p></div>; }
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {

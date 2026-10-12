@@ -10,6 +10,9 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from .agent.runner import RunExecutor
+from .api.runs import make_router as make_runs_router
+from .api.trips import make_router as make_trips_router
 from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
 from .storage.database import Database
 
@@ -26,20 +29,25 @@ def create_app(
         database_path
         or (DATA_DIR if export_dir == EXPORT_DIR else export_dir) / "easytrip.sqlite3"
     )
+    executor = RunExecutor(database)
 
     @asynccontextmanager
     async def lifespan(application):
         database.initialize()
         async with direct_client() as client:
             application.state.http = client
-            yield
+            await executor.start()
+            try:
+                yield
+            finally:
+                await executor.close()
 
     application = FastAPI(title="EasyTrip", lifespan=lifespan)
     application.state.database = database
     application.state.settings = settings
-    from .api.trips import make_router
-
-    application.include_router(make_router())
+    application.state.executor = executor
+    application.include_router(make_trips_router())
+    application.include_router(make_runs_router())
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )

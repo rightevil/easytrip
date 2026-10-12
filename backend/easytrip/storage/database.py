@@ -1,9 +1,12 @@
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from ..domain.models import (
     ArchiveTrip,
@@ -13,6 +16,15 @@ from ..domain.models import (
     TripRequest,
     Workspace,
     WorkspacePatch,
+)
+from ..domain.tasks import (
+    STAGE_MODELS,
+    STAGES,
+    CreateRun,
+    RunBudget,
+    RunCheckpoint,
+    RunSnapshot,
+    RunUsage,
 )
 
 
@@ -298,3 +310,216 @@ class Database:
                 (now(), trip_id),
             )
             connection.execute("DELETE FROM trips WHERE id=?", (trip_id,))
+
+    @staticmethod
+    def _run_row(connection, run_id, trip_id=None):
+        row = connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None or (trip_id is not None and row["trip_id"] != trip_id):
+            raise NotFound()
+        return row
+
+    def enqueue_run(self, trip_id, body: CreateRun):
+        body = CreateRun.model_validate(body)
+        operation = body.model_dump(mode="json", exclude={"operation_id"})
+        with self.connection(write=True) as connection:
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            previous = connection.execute(
+                "SELECT * FROM runs WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            if previous is not None:
+                if json.loads(previous["params_json"])["operation"] != operation:
+                    raise OperationConflict("操作ID已用于不同的任务")
+                return self._run(previous)
+            self._version(trip, body.expected_version)
+            snapshot = RunSnapshot(
+                request=TripRequest.model_validate_json(trip["request_json"]),
+                workspace=Workspace.model_validate_json(trip["workspace_json"]),
+                workspace_version=trip["workspace_version"],
+                messages_count=connection.execute(
+                    "SELECT count(*) FROM messages WHERE trip_id=?", (trip_id,)
+                ).fetchone()[0],
+                operation=operation,
+            )
+            run_id, timestamp = str(uuid4()), now()
+            usage = {
+                "steps": 0, "elapsed_seconds": 0.0, "external_calls": 0,
+                "model_tokens": 0, "images": 0,
+            }
+            connection.execute(
+                "INSERT INTO runs (id,trip_id,operation_id,request_version,kind,status,stage,params_json,budget_json,checkpoint_json,usage_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, trip_id, str(body.operation_id), body.expected_version,
+                 body.kind, "pending", STAGES[0], encode(snapshot.model_dump(mode="json")),
+                 encode(body.budget.model_dump()), encode({"completed_stages": []}),
+                 encode(usage), timestamp, timestamp),
+            )
+            return self._run(self._run_row(connection, run_id))
+
+    def get_run(self, run_id, trip_id=None):
+        with self.connection() as connection:
+            return self._run(self._run_row(connection, run_id, trip_id))
+
+    @staticmethod
+    def _elapsed_usage(row):
+        usage = json.loads(row["usage_json"])
+        if row["status"] == "running":
+            usage["elapsed_seconds"] += max(
+                0, (datetime.now(timezone.utc) - datetime.fromisoformat(row["updated_at"])).total_seconds()
+            )
+        return usage
+
+    def recover_runs(self, *, graceful=False):
+        with self.connection(write=True) as connection:
+            for row in connection.execute("SELECT * FROM runs WHERE status IN ('pending','running')").fetchall():
+                usage = self._elapsed_usage(row) if graceful else json.loads(row["usage_json"])
+                if not graceful and row["status"] == "running":
+                    usage["interrupted_stage_time_unknown"] = True
+                connection.execute(
+                    "UPDATE runs SET status='recoverable',generation=generation+1,stop_reason='app_restarted',usage_json=?,updated_at=? WHERE id=?",
+                    (encode(usage), now(), row["id"]),
+                )
+
+    def claim_run(self):
+        with self.connection(write=True) as connection:
+            while True:
+                row = connection.execute(
+                    "SELECT * FROM runs WHERE status='pending' ORDER BY created_at,id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                try:
+                    run = self._run(row)
+                    RunSnapshot.model_validate(run["params"])
+                    RunBudget.model_validate(run["budget"])
+                    checkpoint = RunCheckpoint.model_validate(run["checkpoint"])
+                    usage = RunUsage.model_validate(run["usage"])
+                    if usage.steps != len(checkpoint.completed_stages) or row["stage"] != STAGES[len(checkpoint.completed_stages)] or row["kind"] != "prepare_workspace":
+                        raise ValueError("无效任务阶段")
+                except (ValueError, KeyError, TypeError, IndexError, ValidationError):
+                    connection.execute(
+                        "UPDATE runs SET status='failed',generation=generation+1,error_code='invalid_run_data',stop_reason='invalid_run_data',updated_at=? WHERE id=?",
+                        (now(), row["id"]),
+                    )
+                    continue
+                trip = self._row(connection, row["trip_id"])
+                if trip["status"] == "archived" or trip["request_version"] != row["request_version"]:
+                    status = "cancelled" if trip["status"] == "archived" else "stale"
+                    reason = "trip_archived" if status == "cancelled" else "request_changed"
+                    connection.execute(
+                        "UPDATE runs SET status=?,generation=generation+1,stop_reason=?,updated_at=? WHERE id=?",
+                        (status, reason, now(), row["id"]),
+                    )
+                    continue
+                connection.execute(
+                    "UPDATE runs SET status='running',generation=generation+1,updated_at=? WHERE id=?",
+                    (now(), row["id"]),
+                )
+                return self._run(self._run_row(connection, row["id"]))
+
+    def _run_current(self, connection, row, generation):
+        if row["status"] != "running" or row["generation"] != generation:
+            return False
+        trip = self._row(connection, row["trip_id"])
+        if trip["status"] == "archived" or trip["request_version"] != row["request_version"]:
+            status = "cancelled" if trip["status"] == "archived" else "stale"
+            reason = "trip_archived" if status == "cancelled" else "request_changed"
+            connection.execute(
+                "UPDATE runs SET status=?,generation=generation+1,stop_reason=?,updated_at=? WHERE id=?",
+                (status, reason, now(), row["id"]),
+            )
+            return False
+        return True
+
+    def run_is_current(self, run_id, generation):
+        with self.connection(write=True) as connection:
+            try:
+                row = self._run_row(connection, run_id)
+            except NotFound:
+                return False
+            return self._run_current(connection, row, generation)
+
+    def commit_run_stage(self, run_id, generation, stage, output, elapsed_seconds):
+        output = STAGE_MODELS[stage].model_validate(output).model_dump(mode="json")
+        if not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+            raise ValueError("无效执行时间")
+        with self.connection(write=True) as connection:
+            try:
+                row = self._run_row(connection, run_id)
+            except NotFound:
+                return False
+            if not self._run_current(connection, row, generation):
+                return False
+            checkpoint, usage = json.loads(row["checkpoint_json"]), json.loads(row["usage_json"])
+            completed = checkpoint["completed_stages"]
+            if row["stage"] != stage or completed != list(STAGES[:len(completed)]) or stage != STAGES[len(completed)]:
+                raise OperationConflict("任务阶段已更新")
+            budget = json.loads(row["budget_json"])
+            if usage["steps"] >= budget["max_steps"] or usage["elapsed_seconds"] + elapsed_seconds > budget["max_seconds"]:
+                usage["elapsed_seconds"] += elapsed_seconds
+                connection.execute(
+                    "UPDATE runs SET status='partial',stop_reason=?,usage_json=?,updated_at=? WHERE id=?",
+                    ("step_budget_exhausted" if usage["steps"] >= budget["max_steps"] else "time_budget_exhausted", encode(usage), now(), run_id),
+                )
+                return False
+            checkpoint[stage] = output
+            completed.append(stage)
+            usage["steps"] += 1
+            usage["elapsed_seconds"] += elapsed_seconds
+            done = len(completed) == len(STAGES)
+            connection.execute(
+                "UPDATE runs SET checkpoint_json=?,usage_json=?,status=?,stage=?,result_json=?,error_code=NULL,stop_reason=NULL,updated_at=? WHERE id=?",
+                (encode(checkpoint), encode(usage), "completed" if done else "running",
+                 "done" if done else STAGES[len(completed)], encode(output) if done else None,
+                 now(), run_id),
+            )
+            return True
+
+    def stop_run(self, run_id, generation, status, reason, *, elapsed_seconds=0.0):
+        if status not in ("partial", "failed") or not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+            raise ValueError("无效停止状态")
+        with self.connection(write=True) as connection:
+            try:
+                row = self._run_row(connection, run_id)
+            except NotFound:
+                return False
+            if not self._run_current(connection, row, generation):
+                return False
+            usage = json.loads(row["usage_json"])
+            usage["elapsed_seconds"] += elapsed_seconds
+            connection.execute(
+                "UPDATE runs SET status=?,stop_reason=?,error_code=?,usage_json=?,updated_at=? WHERE id=?",
+                (status, reason, reason if status == "failed" else None, encode(usage), now(), run_id),
+            )
+            return True
+
+    def cancel_run(self, run_id, trip_id, generation):
+        with self.connection(write=True) as connection:
+            row = self._run_row(connection, run_id, trip_id)
+            if row["generation"] != generation:
+                raise OperationConflict("任务已更新，请重新读取")
+            if row["status"] not in ("completed", "stale", "cancelled"):
+                connection.execute(
+                    "UPDATE runs SET status='cancelled',generation=generation+1,stop_reason='user_cancelled',usage_json=?,updated_at=? WHERE id=?",
+                    (encode(self._elapsed_usage(row)), now(), run_id),
+                )
+            return self._run(self._run_row(connection, run_id))
+
+    def resume_run(self, run_id, trip_id, generation):
+        with self.connection(write=True) as connection:
+            row = self._run_row(connection, run_id, trip_id)
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            self._version(trip, row["request_version"])
+            if row["generation"] != generation or row["status"] not in ("recoverable", "cancelled", "partial", "failed"):
+                raise OperationConflict("任务已更新或不能继续")
+            if row["error_code"] == "invalid_run_data":
+                raise OperationConflict("任务数据不完整，请新建准备任务")
+            usage, budget = json.loads(row["usage_json"]), json.loads(row["budget_json"])
+            if row["stop_reason"] in ("step_budget_exhausted", "time_budget_exhausted") or usage["steps"] >= budget["max_steps"] or usage["elapsed_seconds"] >= budget["max_seconds"]:
+                raise OperationConflict("本轮预算已耗尽，请新建准备任务")
+            connection.execute(
+                "UPDATE runs SET status='pending',generation=generation+1,error_code=NULL,stop_reason=NULL,updated_at=? WHERE id=?",
+                (now(), run_id),
+            )
+            return self._run(self._run_row(connection, run_id))

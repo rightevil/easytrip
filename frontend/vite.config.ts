@@ -4,8 +4,13 @@ import type { ProxyOptions } from 'vite';
 
 const localProxy: ProxyOptions = {
   target: 'http://127.0.0.1:8000',
+  changeOrigin: true,
   configure(proxy) {
-    proxy.on('proxyReq', request => request.setHeader('Origin', 'http://127.0.0.1:8000'));
+    proxy.on('proxyReq', (request, incoming) => {
+      if (!incoming.headers.origin || incoming.headers.origin === 'http://127.0.0.1:5173') {
+        request.setHeader('Origin', 'http://127.0.0.1:8000');
+      }
+    });
   },
 };
 

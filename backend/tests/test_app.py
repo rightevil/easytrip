@@ -1,9 +1,13 @@
+import time
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from easytrip.config import Settings
+from easytrip.domain.models import CreateTrip
+from easytrip.domain.tasks import CreateRun
 from easytrip.main import create_app
+from easytrip.storage.database import Database
 
 
 def test_actual_application_initializes_and_reopens_trip_data(tmp_path):
@@ -75,3 +79,44 @@ def test_missing_frontend_build_is_explicit(tmp_path):
         assert client.get("/").status_code == 503
         assert "尚未构建" in client.get("/").text
         assert client.get("/api/trips").status_code == 200
+
+
+def test_application_restart_waits_for_user_resume_and_executes_saved_run(tmp_path):
+    path = tmp_path / "recovery.sqlite3"
+    database = Database(path)
+    database.initialize()
+    trip = database.create_trip(CreateTrip(operation_id=uuid4()))
+    interrupted = database.enqueue_run(
+        trip["id"], CreateRun(operation_id=uuid4(), expected_version=1)
+    )
+    with TestClient(
+        create_app(Settings(), tmp_path, database_path=path),
+        base_url="http://127.0.0.1",
+    ) as client:
+        route = f"/api/runs/{interrupted['id']}"
+        recovered = client.get(route, params={"trip_id": trip["id"]}).json()
+        assert recovered["status"] == "recoverable"
+        assert recovered["usage"]["steps"] == 0
+        assert client.get(route, params={"trip_id": str(uuid4())}).status_code == 404
+        resumed = client.post(
+            route + "/resume",
+            json={"trip_id": trip["id"], "generation": recovered["generation"]},
+        )
+        assert resumed.status_code == 200
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            finished = client.get(route, params={"trip_id": trip["id"]}).json()
+            if finished["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert finished["status"] == "completed"
+        assert finished["usage"]["steps"] == 3
+        assert finished["usage"]["external_calls"] == 0
+        assert finished["result"]["conditions"]["destination"] is None
+    with TestClient(
+        create_app(Settings(), tmp_path, database_path=path),
+        base_url="http://127.0.0.1",
+    ) as client:
+        retained = client.get(route, params={"trip_id": trip["id"]}).json()
+        assert retained["status"] == "completed"
+        assert retained["usage"]["steps"] == 3

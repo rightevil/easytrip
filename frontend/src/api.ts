@@ -28,10 +28,26 @@ export interface Message {
 }
 export interface Run {
   id: string;
-  status: string;
-  phase: string;
+  trip_id: string;
+  kind: 'prepare_workspace';
+  status: 'pending' | 'running' | 'recoverable' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'stale';
+  stage: 'validate_request' | 'read_workspace' | 'summarize' | 'done';
   request_version: number;
+  generation: number;
+  params: Record<string, unknown>;
+  budget: { max_steps: number; max_seconds: number };
+  checkpoint: { completed_stages?: string[]; [key: string]: unknown };
+  usage: { steps: number; elapsed_seconds: number; external_calls: number; model_tokens: number; images: number };
+  result: {
+    conditions: { conditions_complete: boolean; missing: string[]; destination: string | null; transport: string };
+    workspace: { messages_count: number; selected_count: number; map_visible_count: number; workspace_version: number; active_tab: string };
+    summary: string;
+    not_connected: string[];
+  } | null;
+  error_code: string | null;
+  stop_reason: string | null;
   created_at: string;
+  updated_at: string;
 }
 export interface Trip {
   id: string;
@@ -94,4 +110,9 @@ export const api = {
   archive: (id: string, expected_version: number, archived: boolean) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/archive`, 'POST', { expected_version, archived }),
   remove: (id: string, expected_version: number) => call<void>(`/trips/${encodeURIComponent(id)}?expected_version=${expected_version}`, 'DELETE'),
+  startRun: (id: string, operation_id: string, expected_version: number) =>
+    call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { operation_id, expected_version, kind: 'prepare_workspace' }),
+  getRun: (id: string, trip_id: string) => call<Run>(`/runs/${encodeURIComponent(id)}?trip_id=${encodeURIComponent(trip_id)}`),
+  runAction: (id: string, action: 'cancel' | 'resume', trip_id: string, generation: number) =>
+    call<Run>(`/runs/${encodeURIComponent(id)}/${action}`, 'POST', { trip_id, generation }),
 };
