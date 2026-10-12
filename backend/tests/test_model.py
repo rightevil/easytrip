@@ -1,10 +1,12 @@
 import asyncio
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
 
-from easytrip.config import Settings
+from easytrip.config import Settings, direct_client
 from easytrip.integrations.model import extract, image_url
 
 
@@ -57,16 +59,20 @@ def run_extract(responses, sample=None, config=None):
 
     def handle(request):
         requests.append(request)
+        response = responses[len(requests) - 1]
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, httpx.Response):
+            return response
         return httpx.Response(
             200,
             json={
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                responses[len(requests) - 1], ensure_ascii=False
-                            )
-                        }
+                            "content": json.dumps(response, ensure_ascii=False)
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
                 "usage": {
@@ -99,6 +105,17 @@ def test_real_request_shape_and_mixed_comment(base):
     body = json.loads(requests[0].content)
     assert body["model"] == "test-vision-model"
     assert body["response_format"] == {"type": "json_object"}
+    assert body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert body["max_tokens"] == 16384
+    assert requests[0].extensions["timeout"]["read"] == 300
+    assert result["usage_complete"] is True
+    record = result["requests"][0]
+    assert record["task_type"] == "text_extraction"
+    assert record["max_tokens"] == body["max_tokens"]
+    assert record["thinking_enabled"] is True
+    assert record["usage_complete"] is True
+    assert record["finish_reason"] == "stop"
+    assert record["reasoning_returned"] is False
     assert "test-secret" not in str(body)
     assert result["extraction"]["image_observations"] == []
 
@@ -127,6 +144,19 @@ def test_invalid_evidence_or_structure_repairs_once(change):
         "completion_tokens": 10,
         "total_tokens": 30,
     }
+    assert result["usage_complete"] is True
+    assert [record["task_type"] for record in result["requests"]] == [
+        "text_extraction",
+        "output_repair",
+    ]
+    assert [json.loads(request.content)["max_tokens"] for request in requests] == [
+        16384,
+        32768,
+    ]
+    assert all(
+        json.loads(request.content)["chat_template_kwargs"] == {"enable_thinking": True}
+        for request in requests
+    )
     repair = json.loads(requests[1].content)["messages"][-1]["content"]
     assert "校验未通过" in repair
 
@@ -173,6 +203,35 @@ def test_missing_input_comment_requires_explicit_classification(repair_succeeds)
         assert result["extraction"] is None
 
 
+def test_every_input_comment_can_be_explicit_unknown_or_multiple_dimensions():
+    sample = notes()
+    sample[0]["comments"].append({"source_id": "note-1-comment-2", "text": "赞"})
+    output = extraction()
+    output["comments"] += [
+        {
+            "source_id": "note-1-comment-1",
+            "place_name": "西湖",
+            "dimension": "景观",
+            "stance": "positive",
+            "evidence": "夜景值得",
+        },
+        {
+            "source_id": "note-1-comment-2",
+            "place_name": None,
+            "dimension": "无地点体验信息",
+            "stance": "unknown",
+            "evidence": "赞",
+        },
+    ]
+    result, requests = run_extract([output], sample)
+    assert result["status"] == "passed"
+    assert len(requests) == 1
+    assert len(result["extraction"]["comments"]) == 3
+    assert result["unclassified_comment_ids"] == []
+    assert result["extraction"]["comments"][-1]["place_name"] is None
+    assert result["extraction"]["comments"][-1]["stance"] == "unknown"
+
+
 def test_image_filter_and_original_indices_with_three_image_limit():
     sample = notes()
     sample[0]["images"] = [
@@ -198,6 +257,8 @@ def test_image_filter_and_original_indices_with_three_image_limit():
     result, requests = run_extract([output], sample)
     assert result["images_submitted"] == 3
     body = json.loads(requests[0].content)
+    assert body["max_tokens"] == 32768
+    assert result["requests"][0]["task_type"] == "multimodal_extraction"
     urls = [
         part["image_url"]["url"]
         for part in body["messages"][1]["content"]
@@ -227,6 +288,13 @@ def test_image_observation_must_reference_submitted_image_and_repair_is_text_onl
     result, requests = run_extract([invalid, extraction()], sample)
     assert result["status"] == "passed"
     assert result["images_submitted"] == 1
+    assert [record["task_type"] for record in result["requests"]] == [
+        "multimodal_extraction",
+        "output_repair",
+    ]
+    assert all(
+        json.loads(request.content)["max_tokens"] == 32768 for request in requests
+    )
     assert all(
         isinstance(message["content"], str)
         for message in json.loads(requests[1].content)["messages"]
@@ -246,19 +314,201 @@ def test_malformed_image_urls_are_excluded(url):
     assert image_url(url) is None
 
 
-def test_http_error_propagates_without_retry():
-    calls = []
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.Response(401, json={"error": "unauthorized"}),
+        httpx.ReadTimeout("https://model.example/?key=test-secret"),
+        httpx.ConnectError("https://model.example/?key=test-secret"),
+    ],
+)
+def test_http_error_returns_failed_without_retry_or_credential_message(failure):
+    result, requests = run_extract([failure])
+    assert result["status"] == "failed"
+    assert result["extraction"] is None
+    assert result["attempts"] == len(requests) == 1
+    assert result["usage"] == {}
+    assert result["usage_complete"] is False
+    assert result["requests"][0]["usage_complete"] is False
+    assert result["requests"][0]["error"] == (
+        "HTTPStatusError"
+        if isinstance(failure, httpx.Response)
+        else type(failure).__name__
+    )
+    if isinstance(failure, httpx.Response):
+        assert result["requests"][0]["http_status"] == 401
+    assert "test-secret" not in json.dumps(result)
+    assert "model.example" not in json.dumps(result)
 
-    def handle(request):
-        calls.append(request)
-        return httpx.Response(401, json={"error": "unauthorized"})
 
-    async def run():
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handle), trust_env=False
-        ) as client:
-            await extract(client, settings(), notes())
+def test_repair_timeout_preserves_first_response_usage_without_network_retry():
+    invalid = extraction()
+    invalid["places"][0]["evidence"] = "编造的证据"
+    result, requests = run_extract([invalid, httpx.ReadTimeout("fixture timeout")])
+    assert result["status"] == "failed"
+    assert result["extraction"] is None
+    assert result["attempts"] == len(requests) == 2
+    assert result["usage"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+    }
+    assert result["usage_complete"] is False
+    assert [record["usage_complete"] for record in result["requests"]] == [True, False]
+    assert result["requests"][1]["task_type"] == "output_repair"
+    assert result["requests"][1]["max_tokens"] == 32768
+    assert result["requests"][1]["error"] == "ReadTimeout"
+    assert all(
+        isinstance(message["content"], str)
+        for message in json.loads(requests[1].content)["messages"]
+    )
 
-    with pytest.raises(httpx.HTTPStatusError):
-        asyncio.run(run())
-    assert len(calls) == 1
+
+def test_actual_extract_post_ignores_proxy_environment(monkeypatch):
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append(
+                (self.path, self.headers["Authorization"], json.loads(body))
+            )
+            response = json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(extraction(), ensure_ascii=False)
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+
+        async def run():
+            async with direct_client() as client:
+                return await extract(
+                    client,
+                    settings(f"http://127.0.0.1:{server.server_port}/v1"),
+                    notes(),
+                )
+
+        result = asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+    assert result["status"] == "passed"
+    assert result["usage"]["total_tokens"] == 15
+    assert len(received) == 1
+    path, authorization, body = received[0]
+    assert path == "/v1/chat/completions"
+    assert authorization == "Bearer test-secret"
+    assert body["model"] == "test-vision-model"
+    assert "test-secret" not in json.dumps(body)
+    assert body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert body["max_tokens"] == 16384
+
+
+def test_reasoning_metadata_is_recorded_without_exporting_reasoning_content():
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(extraction()),
+                        "reasoning_content": "private reasoning test-secret",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            },
+        },
+    )
+    result, requests = run_extract([response])
+    assert result["status"] == "passed"
+    assert len(requests) == 1
+    assert result["usage_complete"] is True
+    assert result["requests"][0]["reasoning_returned"] is True
+    assert result["requests"][0]["reasoning_tokens"] == 3
+    assert result["requests"][0]["finish_reason"] == "stop"
+    assert result["usage"]["reasoning_tokens"] == 3
+    assert "private reasoning" not in json.dumps(result)
+    assert "test-secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {"prompt_tokens": True, "completion_tokens": 5, "total_tokens": 15},
+        {"prompt_tokens": 10, "completion_tokens": -1, "total_tokens": 15},
+    ],
+)
+def test_missing_or_invalid_usage_is_reported_incomplete(usage):
+    result, requests = run_extract(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(extraction())},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": usage,
+                },
+            )
+        ]
+    )
+    assert result["status"] == "passed"
+    assert len(requests) == 1
+    assert result["usage_complete"] is False
+    assert result["requests"][0]["usage_complete"] is False
+    assert all(type(count) is int and count >= 0 for count in result["usage"].values())
+
+
+@pytest.mark.parametrize("choice", [None, "not an object", {"message": None}])
+def test_malformed_choice_repairs_once_without_unhandled_attribute_error(choice):
+    malformed = httpx.Response(200, json={"choices": [choice]})
+    result, requests = run_extract([malformed, extraction()])
+    assert result["status"] == "passed"
+    assert result["attempts"] == len(requests) == 2
+    assert result["usage_complete"] is False

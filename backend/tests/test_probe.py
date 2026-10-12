@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -312,3 +313,78 @@ def test_new_run_keeps_only_current_checkpoint_and_clears_old_map(
         assert report["xhs_sample"]["replies_analysed"] == 0
     else:
         assert samples == []
+
+
+def test_reused_sample_does_not_keep_previous_analysis_count_when_model_fails(
+    monkeypatch, tmp_path
+):
+    from easytrip.integrations import model
+
+    data_dir, export_dir = tmp_path / "data", tmp_path / "reports"
+    notes = [
+        {
+            "source_id": "note-1",
+            "title": "西湖",
+            "text": "西湖适合散步",
+            "images": [],
+            "comments": [
+                {"source_id": "note-1-comment-1", "text": "散步很舒服"},
+                {"source_id": "note-1-comment-2", "text": "人多吗"},
+            ],
+        }
+    ]
+    save_json(data_dir / "notes-checkpoint.json", notes)
+    save_json(
+        data_dir / "last-run.json",
+        {
+            "xhs_sample": {
+                "status": "通过",
+                "notes_read": 1,
+                "comments_selected": 2,
+                "comments_submitted": 42,
+                "comments_analysed": 42,
+                "comments_unclassified": 0,
+            }
+        },
+    )
+    settings = Settings(
+        model_base_url="https://model.example/v1",
+        model_api_key="test-secret",
+        model_id="test-vision-model",
+    )
+    failed = {
+        "status": "failed",
+        "extraction": None,
+        "attempts": 1,
+        "error": "ReadTimeout",
+        "usage": {},
+        "usage_complete": False,
+        "requests": [
+            {
+                "task_type": "text_extraction",
+                "max_tokens": 16384,
+                "thinking_enabled": True,
+                "usage_complete": False,
+                "error": "ReadTimeout",
+            }
+        ],
+    }
+    extract = AsyncMock(return_value=failed)
+
+    @asynccontextmanager
+    async def client():
+        yield object()
+
+    monkeypatch.setattr(Settings, "load", staticmethod(lambda: settings))
+    monkeypatch.setattr(probe, "DATA_DIR", data_dir)
+    monkeypatch.setattr(probe, "EXPORT_DIR", export_dir)
+    monkeypatch.setattr(probe, "direct_client", client)
+    monkeypatch.setattr(model, "extract", extract)
+    asyncio.run(probe.run(SimpleNamespace(reuse=True, xhs_only=True)))
+    report = json.loads((export_dir / "capabilities.json").read_text(encoding="utf-8"))
+    extract.assert_awaited_once()
+    assert extract.await_args.args[2] == notes
+    assert report["model"]["status"] == "failed"
+    assert report["xhs_sample"]["comments_submitted"] == 2
+    assert report["xhs_sample"]["comments_analysed"] == 0
+    assert report["xhs_sample"]["comments_unclassified"] == 2

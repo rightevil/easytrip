@@ -399,6 +399,12 @@ async def run(args):
             f"真实笔记 {len(notes)} 篇，选取一级评论 {sum(len(n['comments']) for n in notes)} 条",
             flush=True,
         )
+        if "xhs_sample" in report:
+            report["xhs_sample"].update(
+                comments_submitted=0,
+                comments_analysed=0,
+                comments_unclassified=sum(len(n["comments"]) for n in notes),
+            )
         if (
             notes
             and settings.model_base_url
@@ -409,15 +415,16 @@ async def run(args):
 
             try:
                 stage_start = time.perf_counter()
+                if "xhs_sample" in report:
+                    report["xhs_sample"]["comments_submitted"] = sum(
+                        len(n["comments"]) for n in notes
+                    )
                 model_result = await extract(client, settings, notes)
                 model_result["elapsed_seconds"] = round(
                     time.perf_counter() - stage_start, 3
                 )
                 report["model"] = model_result
                 if model_result.get("status") == "passed" and "xhs_sample" in report:
-                    report["xhs_sample"]["comments_submitted"] = sum(
-                        len(n["comments"]) for n in notes
-                    )
                     report["xhs_sample"]["comments_analysed"] = len(
                         {
                             comment["source_id"]
@@ -495,10 +502,12 @@ def write_report(report, notes):
         "xhs_login",
         "xhs_sample",
         "model",
+        "model_configuration_check",
         "model_semantics",
         "amap_mcp",
         "amap_ambiguity",
         "map_browser",
+        "regression_checks",
     ):
         item = report.get(key, {"status": "未验证"})
         status = {"passed": "通过", "failed": "不可用"}.get(
@@ -518,6 +527,7 @@ def write_report(report, notes):
         f"样本：{len(notes)} 篇唯一笔记；选取 {sum(len(note['comments']) for note in notes)} 条一级评论；二级回复关闭。",
         f"显式模型判断：{report.get('xhs_sample', {}).get('comments_analysed', 0)} 条唯一一级评论；未判断 {report.get('xhs_sample', {}).get('comments_unclassified', '见模型状态')} 条。",
         f"模型用量：{report.get('model', {}).get('usage', {})}；实际提交 {report.get('model', {}).get('images_submitted', 0)} 张图片，样本共有 {sum(note.get('image_count', 0) for note in notes)} 张，并未全部理解。",
+        f"模型请求策略/用量完整性：{report.get('model', {}).get('requests', '旧轮次未记录')} / {report.get('model', {}).get('usage_complete', '旧轮次未记录')}；超时请求可能已计费，已知用量不代表总消耗。",
         f"MCP发现：小红书 {len(report.get('xhs_mcp', {}).get('tools', []))} 工具，高德 {len(report.get('amap_mcp', {}).get('tools', []))} 工具；小红书工具调用 {len(report.get('xhs_calls', []))} 次，本轮高德Web调用 {report.get('amap_web_calls', 0)} 次。",
         "",
         "- 原始 note_id、用户身份、xsec_token、带签名链接不进入导出样本；本地检查点位于已忽略的 data/。",
@@ -531,6 +541,7 @@ def write_report(report, notes):
         "## 受阻能力和字段差异",
         "",
         "详见 field-differences.md 与 capabilities.json。缺字段保持未知，缺类别不追加无上限搜索。",
+        "模型历史失败和已知用量见单独保存的 model-*.json；未返回的用量保持未知，不能将成功轮次用量当作累计费用。",
         "",
         "## 复现",
         "",

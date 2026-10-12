@@ -32,6 +32,16 @@ uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 800
 - 高德：`AMAP_WEB_KEY`、`AMAP_JS_KEY`、`AMAP_JS_SECURE_KEY`。远程官方 MCP 默认复用 Web Key，可用 `AMAP_MCP_URL` 单独配置。
 - Agnes：支持现有 `AGNES_URL`、`AGNES_KEY`、`AGNES_MODEL`，大小写兼容（包括 `AGNES_MODEl`）；也支持通用 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_ID`。URL 为兼容 chat/completions 的 base URL 或完整端点。
 
+Agnes 调用通过 `trust_env=False` 忽略 Windows 系统代理和环境代理，不修改全局代理，也不在直连失败后切换到代理。按 [Agnes 3.0 Flash 官方文档](https://wiki.agnes-ai.com/en/docs/agnes-30-flash)，每次请求（包括结构修复）都发送 `chat_template_kwargs.enable_thinking=true`。当前任务的 `max_tokens` 上限为：
+
+| 任务 | 输出 token 上限 |
+|---|---:|
+| 文本抽取 | 16,384 |
+| 图文抽取 | 32,768 |
+| 结构/证据修复 | 32,768 |
+
+上限在 `easytrip/integrations/model.py` 的 `TOKEN_BUDGETS` 中统一定义，不代表每次都会消耗满额。读取响应最长等待 300 秒；结构校验失败只修复一次，修复不重复提交图片。网络/HTTP 错误停止调用，报告保留先前已返回用量并将缺失用量标为未知。`requests` 记录任务、预算、结束原因和是否返回 reasoning 字段，不保存思考正文；服务未返回该字段时，不能据此证明服务端实际推理过程。
+
 高德 JS 安全密钥仅由本机后端 `_AMapService` 代理追加，不出现在页面配置。JS Key 按 SDK 要求传给浏览器，生产使用前仍需配置合法域名。服务只绑定回环地址，拒绝非本机 Host 和跨来源请求。
 
 ## 探测范围

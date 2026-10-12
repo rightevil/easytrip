@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..config import Settings, validate_url
 
 Nonempty = Annotated[str, Field(min_length=1, pattern=r"\S")]
+TOKEN_BUDGETS = {
+    "text_extraction": 16384,
+    "multimodal_extraction": 32768,
+    "output_repair": 32768,
+}
 
 
 class StrictModel(BaseModel):
@@ -177,31 +182,80 @@ async def extract(
         {"role": "system", "content": system},
         {"role": "user", "content": content},
     ]
-    usage = {}
+    usage, requests = {}, []
     summary = ""
     for attempt in range(1, 3):
-        response = await client.post(
-            endpoint,
-            timeout=httpx.Timeout(40, read=120),
-            headers={"Authorization": f"Bearer {settings.model_api_key}"},
-            json={
-                "model": settings.model_id,
-                "max_tokens": 8192,
-                "messages": messages,
-                "stream": False,
-                "response_format": {"type": "json_object"},
-            },
+        task_type = (
+            "output_repair"
+            if attempt == 2
+            else "multimodal_extraction"
+            if submitted
+            else "text_extraction"
         )
-        response.raise_for_status()
-        payload = response.json()
-        call_usage = payload.get("usage") if isinstance(payload, dict) else None
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            count = call_usage.get(key) if isinstance(call_usage, dict) else None
-            if type(count) is int and count >= 0:
-                usage[key] = usage.get(key, 0) + count
+        request_record = {
+            "task_type": task_type,
+            "max_tokens": TOKEN_BUDGETS[task_type],
+            "thinking_enabled": True,
+            "usage_complete": False,
+        }
+        requests.append(request_record)
+        try:
+            response = await client.post(
+                endpoint,
+                timeout=httpx.Timeout(40, read=300),
+                headers={"Authorization": f"Bearer {settings.model_api_key}"},
+                json={
+                    "model": settings.model_id,
+                    "max_tokens": TOKEN_BUDGETS[task_type],
+                    "chat_template_kwargs": {"enable_thinking": True},
+                    "messages": messages,
+                    "stream": False,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            summary = type(error).__name__
+            request_record["error"] = summary
+            if isinstance(error, httpx.HTTPStatusError):
+                request_record["http_status"] = error.response.status_code
+            # A timeout can occur after charging; retain known usage without retrying.
+            break
         output = ""
         try:
-            output = payload["choices"][0]["message"]["content"]
+            payload = response.json()
+            call_usage = payload.get("usage") if isinstance(payload, dict) else None
+            counts = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                count = call_usage.get(key) if isinstance(call_usage, dict) else None
+                if type(count) is int and count >= 0:
+                    counts[key] = count
+                    usage[key] = usage.get(key, 0) + count
+            request_record["usage_complete"] = len(counts) == 3
+            request_record["usage"] = counts
+            details = (
+                call_usage.get("completion_tokens_details")
+                if isinstance(call_usage, dict)
+                else None
+            )
+            reasoning_tokens = (
+                details.get("reasoning_tokens") if isinstance(details, dict) else None
+            )
+            if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+                request_record["reasoning_tokens"] = reasoning_tokens
+                usage["reasoning_tokens"] = (
+                    usage.get("reasoning_tokens", 0) + reasoning_tokens
+                )
+            choice = payload["choices"][0]
+            if not isinstance(choice, dict) or not isinstance(
+                choice.get("message"), dict
+            ):
+                raise TypeError("模型响应 choice/message 必须为对象")
+            request_record["finish_reason"] = choice.get("finish_reason")
+            request_record["reasoning_returned"] = bool(
+                choice["message"].get("reasoning_content")
+            )
+            output = choice["message"]["content"]
             if not isinstance(output, str):
                 raise TypeError("模型响应 content 必须为 JSON 字符串")
             result = validate_extraction(
@@ -217,6 +271,8 @@ async def extract(
                     comment_sources - {comment.source_id for comment in result.comments}
                 ),
                 "usage": usage,
+                "usage_complete": all(item["usage_complete"] for item in requests),
+                "requests": requests,
                 "images_submitted": len(submitted),
                 "model_id": settings.model_id,
                 "attempts": attempt,
@@ -252,8 +308,10 @@ async def extract(
         "status": "failed",
         "extraction": None,
         "usage": usage,
+        "usage_complete": all(item["usage_complete"] for item in requests),
+        "requests": requests,
         "images_submitted": len(submitted),
         "model_id": settings.model_id,
-        "attempts": 2,
+        "attempts": len(requests),
         "error": summary,
     }
