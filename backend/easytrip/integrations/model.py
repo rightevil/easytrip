@@ -243,7 +243,7 @@ async def structured_call(
         except (ValidationError, ValueError, KeyError, IndexError, TypeError) as error:
             if isinstance(error, ValidationError):
                 error_summary = "; ".join(
-                    f"{'.'.join(map(str, item['loc']))}: {item['type']}"
+                    f"{'.'.join(map(str, item['loc']))}: {item['type']} ({item['msg']})"
                     for item in error.errors(include_input=False)
                 )
             elif isinstance(error, (KeyError, IndexError, TypeError)):

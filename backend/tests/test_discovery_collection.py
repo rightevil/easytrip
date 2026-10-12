@@ -1,7 +1,7 @@
 import asyncio
 from uuid import uuid4
 
-from easytrip.agent.discovery import DiscoveryRunner
+from easytrip.agent.discovery import DiscoveryRunner, DiscoveryStopped
 from easytrip.config import Settings
 from easytrip.domain.models import CreateTrip
 from easytrip.domain.tasks import CreateRun
@@ -33,11 +33,14 @@ def test_runner_routes_search_and_fetch_from_persisted_stage_inputs(tmp_path, mo
                 return {"notes_obtained": 1}
 
         monkeypatch.setattr("easytrip.agent.discovery.CollectionService", Collector)
-        runner = DiscoveryRunner(database, Settings())
+        async def boundary(*args):
+            raise DiscoveryStopped("collection_boundary")
+
+        runner = DiscoveryRunner(database, Settings(), stages={"extracting": boundary})
         await runner.execute(database.get_run(run["id"]))
         saved = database.get_run(run["id"])
         assert seen == [plan, [{"external_id": "n1"}]]
         assert saved["checkpoint"]["completed_stages"] == ["understanding", "discovering", "fetching"]
         assert saved["checkpoint"]["fetching"]["notes_obtained"] == 1
-        assert saved["status"] == "partial" and saved["stop_reason"] == "stage_not_available"
+        assert saved["status"] == "partial" and saved["stop_reason"] == "collection_boundary"
     asyncio.run(check())

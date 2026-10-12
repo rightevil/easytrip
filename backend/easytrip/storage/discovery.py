@@ -262,9 +262,12 @@ class DiscoveryStore:
         gaps=None,
         image_observations=None,
         submitted_images=None,
+        replace_candidates=False,
     ):
         from .database import OperationConflict
 
+        if type(replace_candidates) is not bool:
+            raise ValueError("候选替换标志必须为布尔值")
         observations = [
             _validate(ImageObservation, item) for item in image_observations or []
         ]
@@ -291,6 +294,9 @@ class DiscoveryStore:
             run = self._discovery_run(connection, trip_id, run_id, generation)
             if run is None:
                 return None
+            if replace_candidates:
+                connection.execute("DELETE FROM gaps WHERE run_id=?", (run_id,))
+                connection.execute("DELETE FROM candidates WHERE run_id=?", (run_id,))
             sources = {
                 row["source_id"]: json.loads(row["snapshot_json"])
                 for row in connection.execute(
@@ -431,6 +437,55 @@ class DiscoveryStore:
             return self._source(
                 connection, trip_id, source_id, run_id, include_private=include_private
             )
+
+    def reuse_note_sources(self, trip_id, run_id, generation, parent_run_id, note_source_id):
+        from .database import NotFound, OperationConflict
+
+        with self.connection(write=True) as connection:
+            run = self._discovery_run(connection, trip_id, run_id, generation)
+            if run is None:
+                return None
+            parent = self._run_row(connection, parent_run_id, trip_id)
+            if parent["kind"] != "discover" or parent["request_version"] != run["request_version"]:
+                raise OperationConflict("复用来源必须属于相同行程条件")
+            rows = connection.execute(
+                "SELECT * FROM source_snapshots WHERE run_id=? AND trip_id=? AND (source_id=? OR json_extract(snapshot_json,'$.parent_source_id')=?) ORDER BY rowid",
+                (parent_run_id, trip_id, note_source_id, note_source_id),
+            ).fetchall()
+            sources = {row["source_id"]: Source.model_validate_json(row["snapshot_json"]) for row in rows}
+            note = sources.get(note_source_id)
+            if note is None or note.kind != "note":
+                raise NotFound()
+            if any(source.read_status != "success" for source in sources.values()):
+                raise OperationConflict("失败来源不能当作成功内容复用")
+            if any(source.reply_to_source_id and source.reply_to_source_id not in sources for source in sources.values()):
+                raise OperationConflict("复用回复缺少父评论")
+            for row in rows:
+                existing = connection.execute("SELECT snapshot_json FROM source_snapshots WHERE run_id=? AND source_id=?", (run_id, row["source_id"])).fetchone()
+                if existing and existing[0] != row["snapshot_json"]:
+                    raise OperationConflict("复用不能覆盖本轮已经读取的来源")
+                # Copy the historical read timestamp; never rewind sources.latest_snapshot_json.
+                connection.execute(
+                    "INSERT OR IGNORE INTO source_snapshots(run_id,source_id,trip_id,request_version,snapshot_json,read_at) VALUES(?,?,?,?,?,?)",
+                    (run_id, row["source_id"], trip_id, run["request_version"], row["snapshot_json"], row["read_at"]),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO run_sources(run_id,source_id,query,purpose) SELECT ?,source_id,query,purpose FROM run_sources WHERE run_id=? AND source_id=?",
+                    (run_id, parent_run_id, row["source_id"]),
+                )
+            return [self._source(connection, trip_id, row["source_id"], run_id) for row in rows]
+
+    def save_discovery_summary(self, run_id, generation, result):
+        from .database import encode
+
+        if not isinstance(result, dict) or len(encode(result).encode("utf-8")) > 1_048_576:
+            raise ValueError("探索摘要必须为有限JSON对象且不超过1MiB")
+        with self.connection(write=True) as connection:
+            row = self._run_row(connection, run_id)
+            if not self._run_current(connection, row, generation):
+                return False
+            connection.execute("UPDATE runs SET result_json=? WHERE id=?", (encode(result), run_id))
+            return True
 
     def list_run_sources(self, trip_id, run_id, *, include_private=False):
         with self.connection() as connection:

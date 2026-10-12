@@ -11,6 +11,8 @@ from ..domain.discovery_tasks import DISCOVERY_STAGES, DiscoverySnapshot
 from ..integrations.xhs import SourcePaused
 from ..services.collection import CollectionService
 from ..services.understanding import understand, validate_understanding
+from ..storage.database import NotFound
+from .content import analyse, evaluate, publish
 
 
 class DiscoveryPaused(RuntimeError):
@@ -80,10 +82,25 @@ class DiscoveryRunner:
             return await CollectionService(self, run, client).discover(run["checkpoint"]["understanding"]["query_plan"])
         if stage == "fetching":
             return await CollectionService(self, run, client).fetch(run["checkpoint"]["discovering"]["feeds"])
+        if stage == "extracting":
+            return await analyse(self, run, snapshot, client)
+        if stage == "evaluating":
+            return await evaluate(self, run, snapshot, client)
+        if stage == "candidates_ready":
+            return run["checkpoint"]["evaluating"]
         raise DiscoveryStopped("stage_not_available")
+
+    async def stop(self, run, snapshot, status, reason, started):
+        # An unavailable summary must not leave the task running after its call has stopped.
+        with suppress(sqlite3.Error, OSError, ValueError, KeyError, NotFound):
+            if snapshot:
+                await publish(self, run, snapshot, stop_reason=reason)
+        await self.db("stop_run", run["id"], run["generation"], status, reason,
+                      elapsed_seconds=monotonic() - started if started else 0)
 
     async def execute(self, run):
         started = None
+        snapshot = None
         generation = run["generation"]
         try:
             snapshot = DiscoverySnapshot.model_validate(run["params"])
@@ -109,12 +126,12 @@ class DiscoveryRunner:
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            await self.db("stop_run", run["id"], run["generation"], "partial", "time_budget_exhausted", elapsed_seconds=monotonic() - started if started else 0)
+            await self.stop(run, snapshot, "partial", "time_budget_exhausted", started)
         except (SourcePaused, DiscoveryPaused) as error:
             reason = "source_login_or_access_required" if isinstance(error, SourcePaused) else str(error)
-            await self.db("stop_run", run["id"], run["generation"], "paused", reason, elapsed_seconds=monotonic() - started if started else 0)
+            await self.stop(run, snapshot, "paused", reason, started)
         except DiscoveryStopped as error:
-            await self.db("stop_run", run["id"], run["generation"], "partial", str(error), elapsed_seconds=monotonic() - started if started else 0)
+            await self.stop(run, snapshot, "partial", str(error), started)
         except (sqlite3.Error, OSError):
             with suppress(sqlite3.Error, OSError):
                 await self.db("stop_run", run["id"], run["generation"], "failed", "storage_unavailable")

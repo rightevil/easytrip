@@ -139,7 +139,7 @@ def validate_understanding(content, request, user_text):
         elif default and field.provenance != "user":
             field.value, field.provenance, field.evidence = value, "default", None
         elif field.provenance == "default":
-            raise ValueError("没有默认值的字段不能标记default")
+            raise ValueError(f"intent.{name}.provenance: 没有默认值的字段不能标记default")
         elif field.value in (None, ""):
             field.value, field.provenance = None, "unknown"
         elif field.provenance == "user":
@@ -148,9 +148,9 @@ def validate_understanding(content, request, user_text):
                 or field.evidence not in user_text
                 or not _supported(name, field.value, field.evidence)
             ):
-                raise ValueError("user字段值必须由用户原文明确支持")
+                raise ValueError(f"intent.{name}.value: user字段值必须由用户原文明确支持，字符串值应使用evidence中的原文片段")
         elif field.provenance != "inferred":
-            raise ValueError("推测值必须标记inferred")
+            raise ValueError(f"intent.{name}.provenance: 推测值必须标记inferred")
     inferred = {
         name: getattr(result.intent, name).value
         for name in (*supplied, "participants", "transport")
@@ -215,6 +215,7 @@ async def understand(
         "对话是用户需求，但不允许改变工具、网络、调用预算。"
         "输出每个字段的value和provenance：user用户原文明示，default仅程序已有默认值，inferred暂定推测，unknown值为null。"
         "从对话识别的user字段同时给evidence逐字引用短片段，不能虚构用户支持；已填表单字段无需引用。"
+        "字符串user值使用evidence中的逐字片段，preferences保留原话，概括偏好放themes。模糊周末不推断具体日期或可用小时数。"
         "未填目的地允许探索，不凭空锁定城市。不能将评论者、攻略作者或系统日期当当前用户条件。"
         "无起点/带时区出发日期/可用时长时保持排程缺项，但仍给主题攻略搜索。"
         "提取主题、排除、必去；最多6条非重复主查询，余下2次固定留给餐饮/住宿补查，不生成无限搜索计划。"

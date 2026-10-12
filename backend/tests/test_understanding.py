@@ -353,3 +353,13 @@ def test_structured_call_rejects_client_that_inherits_system_proxy():
                 )
 
     asyncio.run(check())
+
+
+def test_user_value_repair_names_the_unsupported_field():
+    bad, good = parsed(), parsed()
+    bad["intent"]["preferences"] = {"value": "安静、山水", "provenance": "user", "evidence": "安静有山水"}
+    good["intent"]["preferences"] = {"value": "安静", "provenance": "user", "evidence": "安静"}
+    result, calls = run_understanding([bad, good])
+    assert result["status"] == "passed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "intent.preferences.value" in repair
