@@ -11,7 +11,7 @@ Python 与依赖均由 uv 管理，环境位于 `backend/.venv`，锁定版本�
 ```powershell
 uv --directory backend sync --locked
 uv --directory backend run python -m easytrip.probe
-uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log
+uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
 打开 http://127.0.0.1:8000 查看草稿工作区，http://127.0.0.1:8000/p0/map 查看独立地图验证。如果 uv 不在 PATH，可以使用 `scripts/probes/p0.ps1`，它会查找用户目录 `.local/bin/uv.exe`：
@@ -23,6 +23,8 @@ uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 800
 ```
 
 已有真实笔记检查点时，用 `uv --directory backend run python -m easytrip.probe --reuse` 仅复用详情，再验证模型和高德；脚本支持 `./scripts/probes/p0.ps1 probe -Reuse`。重复执行会产生新的模型和地图服务调用，按账号实际计费。
+
+P1 草稿应用的统一 Windows 入口为根目录 `scripts/dev.ps1`（setup/build/serve/test）；使用方法与验收证据见 [P1 验收记录](../docs/p1-acceptance.md)。SQLite 默认保存于根目录 `data/easytrip.sqlite3`。启动检测未完成任务并标为可恢复，用户确认继续后再执行；本地“准备工作区”任务不调用外部服务。仅运行一个后端进程，不使用多 worker 或自动 reload。
 
 ## 配置
 

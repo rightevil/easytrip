@@ -19,10 +19,12 @@
 uv --directory backend sync --locked
 npm --prefix frontend ci
 npm --prefix frontend run build
-uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --no-access-log
+uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
 工作区：http://127.0.0.1:8000 。独立 P0 地图验证：http://127.0.0.1:8000/p0/map 。P1 不需要填写外部服务配置。
+
+也可使用 Windows 入口：首次 `./scripts/dev.ps1 setup`，然后 `./scripts/dev.ps1 build`、`./scripts/dev.ps1 serve`；`./scripts/dev.ps1 test` 运行前后端回归。`serve -Port 8001` 可选择本机端口。脚本只运行本应用，不修改代理或管理小红书服务。
 
 ```powershell
 ./scripts/probes/p0.ps1 probe
@@ -54,6 +56,10 @@ cz bump
 
 ## 说明
 
-条件、消息和工作区保存在 `data/easytrip.sqlite3`（Git 忽略）。保存失败或发生版本冲突时，界面保留当前编辑并提示处理；关闭页面前应等待“已保存”，未发送消息仅在当前浏览器会话中保留。任务骨架在 P1 下一步接入。
+条件、消息、工作区和任务保存在 `data/easytrip.sqlite3`（Git 忽略）。保存失败或发生版本冲突时，界面保留当前编辑并提示处理；关闭页面前应等待“已保存”，未发送消息仅在当前浏览器会话中保留。
+
+“准备工作区”运行本地三阶段任务，检查条件、汇总已保存内容，支持检查点、取消和重启后恢复。P1 不请求小红书、Agnes 或高德。请只启动一个后端进程，不使用多个 worker 或自动 reload；未完成任务重启后等待用户恢复。
 
 前端开发方式见 [frontend/README.md](frontend/README.md)，API 契约见 [backend/easytrip/api/README.md](backend/easytrip/api/README.md)。旧的 `app/` 路径已迁移到 `backend/`。
+
+P1 五步已交付，测试证据和限制见 [P1 验收记录](docs/p1-acceptance.md)。
