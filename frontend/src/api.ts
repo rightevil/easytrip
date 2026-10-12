@@ -25,25 +25,28 @@ export interface Message {
   content: string;
   status: string;
   created_at: string;
+  discovery_run?: Run;
+  discovery_run_id?: string | null;
 }
 export interface Run {
   id: string;
   trip_id: string;
-  kind: 'prepare_workspace';
-  status: 'pending' | 'running' | 'recoverable' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'stale';
-  stage: 'validate_request' | 'read_workspace' | 'summarize' | 'done';
+  kind: 'prepare_workspace' | 'discover';
+  status: 'pending' | 'running' | 'paused' | 'recoverable' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'stale';
+  stage: 'validate_request' | 'read_workspace' | 'summarize' | 'done' | 'understanding' | 'discovering' | 'fetching' | 'extracting' | 'evaluating' | 'candidates_ready';
   request_version: number;
   generation: number;
   params: Record<string, unknown>;
-  budget: { max_steps: number; max_seconds: number };
-  checkpoint: { completed_stages?: string[]; [key: string]: unknown };
-  usage: { steps: number; elapsed_seconds: number; external_calls: number; model_tokens: number; images: number };
+  budget: { max_steps: number; max_seconds: number } & Partial<DiscoveryBudget>;
+  checkpoint: { completed_stages?: string[]; understanding?: Understanding; [key: string]: unknown };
+  usage: { steps: number; elapsed_seconds: number; external_calls: number; model_tokens: number; images: number; prompt_tokens?: number; completion_tokens?: number; reserved_tokens?: number; unknown_cost_calls?: number; unknown_result_calls?: number; interrupted_stage_time_unknown?: boolean; searches?: number; detail_calls?: number; model_calls?: number } & DiscoveryCoverage;
+  trip_usage?: TripUsage;
   result: {
     conditions: { conditions_complete: boolean; missing: string[]; destination: string | null; transport: string };
     workspace: { messages_count: number; selected_count: number; map_visible_count: number; workspace_version: number; active_tab: string };
     summary: string;
     not_connected: string[];
-  } | null;
+  } | DiscoveryResult | null;
   error_code: string | null;
   stop_reason: string | null;
   created_at: string;
@@ -74,7 +77,6 @@ export class ApiError extends Error {
     super(message);
   }
 }
-
 async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   let response: Response;
   try {
@@ -105,8 +107,8 @@ export const api = {
     call<Trip>(`/trips/${encodeURIComponent(id)}`, 'PATCH', { expected_version, ...draft }),
   workspace: (id: string, expected_version: number, workspace: Workspace) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/workspace`, 'PATCH', { expected_version, workspace }),
-  message: (id: string, operation_id: string, content: string) =>
-    call<Message>(`/trips/${encodeURIComponent(id)}/messages`, 'POST', { operation_id, content }),
+  message: (id: string, operation_id: string, content: string, discovery?: { expected_version: number; budget: DiscoveryBudget }) =>
+    call<Message>(`/trips/${encodeURIComponent(id)}/messages`, 'POST', { operation_id, content, ...(discovery ? { start_discovery: true, ...discovery } : {}) }),
   archive: (id: string, expected_version: number, archived: boolean) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/archive`, 'POST', { expected_version, archived }),
   remove: (id: string, expected_version: number) => call<void>(`/trips/${encodeURIComponent(id)}?expected_version=${expected_version}`, 'DELETE'),
@@ -115,4 +117,15 @@ export const api = {
   getRun: (id: string, trip_id: string) => call<Run>(`/runs/${encodeURIComponent(id)}?trip_id=${encodeURIComponent(trip_id)}`),
   runAction: (id: string, action: 'cancel' | 'resume', trip_id: string, generation: number) =>
     call<Run>(`/runs/${encodeURIComponent(id)}/${action}`, 'POST', { trip_id, generation }),
+  startDiscovery: (id: string, operation_id: string, expected_version: number, budget: DiscoveryBudget, parent_run_id?: string) =>
+    call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { operation_id, expected_version, kind: 'discover', budget, ...(parent_run_id ? { parent_run_id } : {}) }),
+  candidates: (id: string, run_id: string, category: 'all' | 'eat' | 'play' | 'stay', offset = 0) =>
+    call<CandidatePage>(`/trips/${encodeURIComponent(id)}/candidates?run_id=${encodeURIComponent(run_id)}&limit=20&offset=${offset}${category === 'all' ? '' : `&category=${category}`}`),
+  evidence: (id: string, candidate_id: string) => call<CandidateEvidence>(`/trips/${encodeURIComponent(id)}/candidates/${encodeURIComponent(candidate_id)}/evidence`),
+  source: (id: string, source_id: string, run_id: string) => call<Source>(`/trips/${encodeURIComponent(id)}/sources/${encodeURIComponent(source_id)}?run_id=${encodeURIComponent(run_id)}`),
+  sources: (id: string, run_id: string) => call<{ items: Source[] }>(`/trips/${encodeURIComponent(id)}/sources?run_id=${encodeURIComponent(run_id)}`),
+  gaps: (id: string, run_id: string) => call<{ items: Gap[] }>(`/trips/${encodeURIComponent(id)}/gaps?run_id=${encodeURIComponent(run_id)}`),
+  adoptDirection: (id: string, candidate_id: string, run_id: string, operation_id: string, expected_version: number) =>
+    call<Trip>(`/trips/${encodeURIComponent(id)}/directions/${encodeURIComponent(candidate_id)}/adopt`, 'POST', { run_id, operation_id, expected_version }),
 };
+import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';

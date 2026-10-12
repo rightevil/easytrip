@@ -1,6 +1,6 @@
 # 本机行程 API
 
-数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。API 不依赖外部服务，当前消息状态为 `pending`，不会自动调用模型。消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
+数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
 | 方法与路径 | 请求 / 返回 |
 |---|---|
@@ -39,3 +39,20 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 状态为 `pending/running/recoverable/completed/partial/failed/cancelled/stale`。重启前未结束任务只标为 `recoverable`，用户继续后从检查点执行；条件已改变或行程已归档时不能恢复。达到预算保留部分检查点。旧 `generation` 的控制请求返回 409，应读取最新状态后再操作。
 
 `params/budget/checkpoint/usage/result` 均落库，`usage` 记录步骤、已知执行耗时，外部调用、模型 token 与图片数量在 P1 均为零。中断阶段无法精确核算的耗时明确标为未知。生产入口仅启动一个进程和执行器，不使用多 worker 或自动 reload。
+
+## P2 发现与证据
+
+| 方法与路径 | 请求 / 返回 |
+|---|---|
+| `POST /api/trips/{id}/runs` | `kind: "discover"`、UUID `operation_id`、`expected_version`、可选 `budget` / 同条件 `parent_run_id`；返回 Run |
+| `POST /api/trips/{id}/messages` | 另传 `start_discovery: true`、`expected_version` 和可选 `budget`，消息与发现任务原子保存；返回消息及 `discovery_run_id/discovery_run` |
+| `GET /api/trips/{id}/candidates` | 可选 `run_id/category/limit/offset`；返回 `items/total/limit/offset`，未指定轮次时只读当前条件版本 |
+| `GET /api/trips/{id}/candidates/{candidate_id}/evidence` | 返回评价 `items` 与名称来源 `sources`；名称来源不等于正面体验 |
+| `GET /api/trips/{id}/sources/{source_id}?run_id=…` | 指定轮次的原文快照、读取时间和图片原序号 |
+| `GET /api/trips/{id}/sources?run_id=…` | 返回该轮来源 `items` |
+| `GET /api/trips/{id}/gaps` | 可选 `run_id`；返回餐饮、住宿缺口 `items` |
+| `POST /api/trips/{id}/directions/{candidate_id}/adopt` | UUID `operation_id/run_id`、`expected_version`；显式采用有来源城市方向并递增条件版本 |
+
+发现预算默认 600 秒、8 次搜索（预留 2 次补查）、30 篇目标、每篇 20 条一级评论；二级回复关闭，开启后另限全轮 20 条。六阶段按顺序落库；计数区分新取得来源、沿用来源、评论选取/分析/判断、图片提交次数及原图去重覆盖。字段缺失表示历史记录未知，不能推导为零。候选为 `unmatched` 文字草案，`semantic_quality=not_validated` 表示尚无人类完成语义验收。
+
+任务增加 `paused` 状态。取消、恢复仍携带当前 `generation`，条件已变或行程已归档时拒绝执行。恢复复用成功结果与剩余预算；同轮已有失败或未知模型请求时不会再次提交输入，新轮必须显式创建并有独立预算。未知用量保留 `reserved_tokens/unknown_cost_calls/unknown_result_calls`，实际 token 不转换为人民币。来源及调用内容不会覆盖条件，旧轮可指定 `run_id` 查看但不可采用旧方向。

@@ -1,6 +1,6 @@
 # EasyTrip 后端
 
-提供 SQLite 行程持久化、[业务 API](easytrip/api/README.md)与 P0 真实服务验证。React 工作区需先在 `frontend/` 构建，正式攻略理解与自动排程留待后续阶段。
+提供 SQLite 行程持久化、[业务 API](easytrip/api/README.md)、P2 受控攻略发现与 P0 真实服务验证。React 工作区需先在 `frontend/` 构建；P2 真实语义质量尚未通过验收，高德正式匹配和自动排程留待 P3/P4。
 
 ## Windows 使用
 
@@ -79,3 +79,5 @@ uv --directory backend run ruff check .
 ```
 
 自动回归使用脱敏夹具/模拟传输和本机 HTTPServer，不再次访问真实账号。报告只声明已验证能力；少量样本不提供统计准确率或固定人民币成本。
+
+P2 当前结果与未通过项见 [实施与验收记录](../docs/p2-acceptance.md)；离线人工评测工具的调用方式、固定分母与标签要求见 [人工审核说明](../docs/p2-review.md)。真实样本与空标签模板仅存于被忽略的 `reports/p2/`。

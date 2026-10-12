@@ -3,7 +3,8 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { api, ApiError } from './api';
-import type { Trip } from './api';
+import type { Message, Run, Trip } from './api';
+import { defaultDiscoveryBudget } from './discovery-types';
 
 const trip = (id: string, name: string): Trip => ({
   id, name, status: 'draft', request_version: 1, workspace_version: 1,
@@ -163,5 +164,39 @@ describe('real workspace behaviors', () => {
     await screen.findByRole('heading', { name: '第一份行程' });
     expect(screen.getAllByText(sent.content, { selector: '.chat-message p' })).toHaveLength(1);
     expect((screen.getByLabelText('行程想法') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('reopens A before the atomic message response and shows its message and discovery exactly once', async () => {
+    const discovery: Run = { id: 'discovery-one', trip_id: 'one', kind: 'discover', request_version: 2, generation: 1, status: 'completed', stage: 'done', params: {}, budget: defaultDiscoveryBudget, checkpoint: { completed_stages: [] }, usage: { steps: 6, elapsed_seconds: 1, external_calls: 2, model_tokens: 300, images: 0 }, result: null, error_code: null, stop_reason: null, created_at: '2026-10-12T01:00:00Z', updated_at: '2026-10-12T01:00:00Z' };
+    const sent: Message = { id: 'discovery-message', trip_id: 'one', role: 'user', content: '想找安静的水边', status: 'pending', created_at: discovery.created_at, discovery_run_id: discovery.id, discovery_run: discovery };
+    let finish!: (value: Message) => void;
+    vi.spyOn(api, 'message').mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    vi.spyOn(api, 'candidates').mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+    vi.spyOn(api, 'gaps').mockResolvedValue({ items: [] });
+    await openApp();
+    fireEvent.change(screen.getByLabelText(/从哪里出发/), { target: { value: '杭州东站' } });
+    fireEvent.change(screen.getByLabelText('行程想法'), { target: { value: sent.content } });
+    await userEvent.click(screen.getByRole('button', { name: '保存并发现' }));
+    await waitFor(() => expect(api.message).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.message).mock.calls[0][3]).toEqual({ expected_version: 2, budget: defaultDiscoveryBudget });
+    await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
+    await screen.findByRole('heading', { name: '第二份行程' });
+    await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
+    await screen.findByRole('heading', { name: '第一份行程' });
+    expect((screen.getByRole('button', { name: '正在保存…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '发现攻略' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { finish(sent); });
+    await screen.findByText('本轮完成');
+    expect(screen.getAllByText(sent.content, { selector: '.chat-message p' })).toHaveLength(1);
+    expect(screen.getByText('已关联发现任务')).toBeTruthy();
+    expect((screen.getByLabelText('行程想法') as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByRole('button', { name: '保存并发现' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.message).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
+    await screen.findByRole('heading', { name: '第二份行程' });
+    expect(screen.queryByText('本轮完成')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
+    await screen.findByText('本轮完成');
+    expect(screen.getAllByText(sent.content, { selector: '.chat-message p' })).toHaveLength(1);
   });
 });
