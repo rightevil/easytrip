@@ -561,6 +561,80 @@ def test_unclear_pronoun_is_preserved_but_cannot_be_counted_as_linked_experience
     assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
 
 
+@pytest.mark.parametrize("object_text", [None, "", " \t\n"])
+def test_linked_empty_object_uses_single_repair_without_guessing(object_text):
+    bad, good = extraction(), extraction()
+    if object_text is None:
+        bad["evidence"][0].pop("object_text")
+    else:
+        bad["evidence"][0]["object_text"] = object_text
+    result, calls = run([bad, good])
+    assert result["status"] == "passed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "evidence[0].object_text" in repair and "uncertain" in repair
+    assert result["data"]["evidence"][0]["object_text"] == "西湖"
+    schema = json.loads(
+        json.loads(calls[0].content)["messages"][0]["content"].split(
+            "只输出schema JSON: ", 1
+        )[1]
+    )
+    assert {"object_text", "link_status"} <= set(
+        schema["$defs"]["Evidence"]["required"]
+    )
+    assert (
+        "object_text"
+        not in NoteExtraction.model_json_schema()["$defs"]["Evidence"]["required"]
+    )
+
+
+def test_blank_linked_object_error_aggregates_and_stops_after_one_repair():
+    bad = extraction()
+    bad["mentions"][0]["name"] = "不存在的地点"
+    bad["evidence"][0]["object_text"] = ""
+    result, calls = run([bad, bad])
+    assert result["status"] == "failed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert all(
+        path in repair for path in ("evidence[0].object_text", "mentions[0].name")
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_unknown_empty_object_and_legacy_link_remain_conservative(legacy):
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = "这里排队久"
+    data["evidence"][0].update(
+        quote="这里排队久", object_text="", link_status="uncertain"
+    )
+    if legacy:
+        data["evidence"][0].pop("link_status")
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert item["object_text"] == "" and item["link_status"] == "uncertain"
+    assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
+
+
+def test_empty_image_object_stays_unverified_without_text_object_repair():
+    sample, data = note(), extraction()
+    sample["images"] = ["https://sns-img.xhscdn.com/photo"]
+    data["evidence"][0].update(
+        source_id="note-a", object_text="", citation_kind="image", image_index=1
+    )
+    data["image_observations"] = [
+        {"source_id": "note-a", "image_index": 1, "text": "西湖"}
+    ]
+    data["evidence"][0]["quote"] = "西湖"
+    data["evidence"].append(
+        {**extraction()["evidence"][0], "mention_id": None, "link_status": "unlinked"}
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert item["object_text"] == "" and item["link_status"] == "uncertain"
+    assert item["nature"] == "unknown" and item["stance"] == "unknown"
+
+
 def test_two_objects_keep_elderly_and_child_conditions_and_question_nature():
     sample = note()
     sample["text"] = "断桥到花港观鱼的路线"

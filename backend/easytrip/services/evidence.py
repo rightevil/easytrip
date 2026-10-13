@@ -73,6 +73,12 @@ def _extraction_request_schema():
                 "else": {"properties": {"quote": reference}},
             }
         ]
+    evidence = schema["$defs"]["Evidence"]
+    evidence["required"].extend(["object_text", "link_status"])
+    evidence["properties"]["object_text"]["description"] = (
+        "评价对象原名或原文指代；明确整体路线可概括对象并unlinked。"
+        "只有确实不明才为空并uncertain；linked不得为空。"
+    )
     return schema
 
 
@@ -133,8 +139,19 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
     for observation in rows("image_observations"):
         if isinstance(observation, dict):
             observation["uncertain"] = True
-    for row in rows("evidence"):
+    for index, row in enumerate(rows("evidence")):
         if isinstance(row, dict):
+            if (
+                row.get("citation_kind", "text") == "text"
+                and row.get("link_status") == "linked"
+                and isinstance(row.get("object_text", ""), str)
+                and not row.get("object_text", "").strip()
+            ):
+                errors.append(
+                    f"evidence[{index}].object_text: linked不能缺少评价对象；"
+                    "原文明确时写对象，整体路线写对象并unlinked，"
+                    "确实不明时保留空对象并uncertain，不能凭标题猜地点"
+                )
             if "link_status" not in row and row.get("mention_id") is not None:
                 row["link_status"] = "uncertain"
             if row.get("link_status", "unlinked") == "unlinked":
@@ -471,6 +488,9 @@ async def extract_note(
         "每条输入评论至少分类一次，包括unknown；多对象、多维度、多问题拆条。nature区分experience亲历、question提问、hearsay转述、wish期待、suggestion建议、content_reaction内容态度、unknown。"
         "reply_to_source_id标明回复的父评论，只用父评论理解语境；回复quote仍逐字引用自身text，不能借用父评论文字冒充回复者亲历。"
         "每条evidence显式写object_text，填评价对象原名或原文指代；对象确实不明时用空字符串，不省略字段。"
+        "linked表示已明确关联具体提及，object_text不得为空；整体路线/比较的对象明确但不是某个地点时，保留对象并unlinked；"
+        "例如'1号线比7号线时间长'可对象='1号线与7号线'、dimension='时长比较'、mention_id=null、link_status=unlinked；"
+        "'明天开放吗'且船线与景点都可能时才object_text=''、mention_id=null、link_status=uncertain，不把所有评论都弃判。"
         "dimension写原文支持的主要维度，确实不明用unknown；中性费用/时间事实可以stance=unknown，不能因此省略已明确的对象和维度。"
         "点赞/收藏/种草/期待/夸图片不能算亲历，未明确到访不猜测experience；行程过满、整体路线/时间反馈对象为行程或原文全程，object_text写该对象、mention_id=null、link_status=unlinked。"
         "笔记和图片含多个线路/景点时，不能仅凭标题把主体不明评论关联主地点；明确的整体路线、票务、比较、出行意向可概括object_text和主要dimension、mention_id=null、link_status=unlinked，真正指代歧义则object_text为空、mention_id=null、link_status=uncertain，不能把所有评论分给所有地点；局部营地/分店问题不得扩大为整片区域的政策。"
