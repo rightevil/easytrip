@@ -1017,10 +1017,10 @@ def test_generic_mentions_do_not_inflate_direction_ranking_or_member_counts():
         }
         for index in range(10)
     ]
-    directions = build_directions(candidates + generic)
+    directions = build_directions(candidates + generic, [])
     assert [row["city"] for row in directions] == ["D", "C", "B"]
     assert [len(row["mention_ids"]) for row in directions] == [4, 3, 2]
-    assert build_directions(generic) == []
+    assert build_directions(generic, []) == []
 
 
 def test_gaps_depend_on_confirmed_trip_times_and_do_not_erase_food_mentions():
@@ -1058,7 +1058,7 @@ def test_city_without_source_support_is_not_promoted_to_exploration_direction():
     result, _ = run([data])
     candidates = build_candidates([result], sources())
     assert candidates[0]["city"] is None
-    assert build_directions(candidates) == []
+    assert build_directions(candidates, [result]) == []
 
 
 def test_exploration_directions_are_bounded_and_backed_by_candidate_mentions():
@@ -1072,7 +1072,7 @@ def test_exploration_directions_are_bounded_and_backed_by_candidate_mentions():
         }
         for city in ("杭州", "安吉", "桐庐", "南京")
     ]
-    directions = build_directions(candidates)
+    directions = build_directions(candidates, [])
     assert len(directions) == 3
     assert all(
         item["kind"] == "direction"

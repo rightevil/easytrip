@@ -655,16 +655,106 @@ def build_candidates(extractions, sources):
     return candidates
 
 
-def build_directions(candidates):
+def build_directions(candidates, extractions):
     """Compare up to three source-backed regions, without auto-selecting one for Trip."""
+    mentions, evidence, activities = {}, {}, []
+    for extraction in extractions:
+        data = extraction.get("data", extraction)
+        if data is None:
+            continue
+        mentions.update((row["id"], row) for row in data["mentions"])
+        evidence.update((row["id"], row) for row in data["evidence"])
+        activities.extend(data["activities"])
     regions = {}
     for candidate in candidates:
         if candidate.get("city") and candidate.get("kind") != "generic":
             regions.setdefault(candidate["city"], []).append(candidate)
+    locations = {
+        city: [
+            row
+            for row in members
+            if not (
+                row.get("name", "").removesuffix("市") == city.removesuffix("市")
+                and all(
+                    mentions.get(key, {}).get("kind") == "area"
+                    for key in row["mention_ids"]
+                )
+            )
+        ]
+        for city, members in regions.items()
+    }
     result = []
     for city, members in sorted(
-        regions.items(), key=lambda item: (-len(item[1]), item[0])
+        regions.items(), key=lambda item: (-len(locations[item[0]]), item[0])
     )[:3]:
+        mention_ids = {
+            identifier for row in members for identifier in row["mention_ids"]
+        }
+        source_ids = {
+            mentions[key]["source_id"] for key in mention_ids if key in mentions
+        }
+        related = {
+            identifier for row in members for identifier in row["evidence_ids"]
+        } | {
+            row["id"]
+            for row in evidence.values()
+            if row["source_id"] in source_ids
+            and row.get("link_status", "unlinked") == "unlinked"
+            and row.get("object_text") == city
+        }
+        categories = {"play": "玩", "eat": "吃", "stay": "住"}
+        comparison = []
+        missing = []
+        for category, label in categories.items():
+            names = sorted(
+                {
+                    row["name"]
+                    for row in locations[city]
+                    if row["category"] == category and row.get("name")
+                }
+            )
+            comparison.append(
+                f"{label}："
+                + (
+                    "、".join(
+                        name[:60] + ("…" if len(name) > 60 else "")
+                        for name in names[:3]
+                    )
+                    if names
+                    else "尚未取得具体地点"
+                )
+            )
+            if not names:
+                missing.append(f"{label}的具体地点线索不足")
+        quotes = {
+            row["quote"].strip()
+            for row in [
+                *(mentions[key] for key in mention_ids if key in mentions),
+                *(evidence[key] for key in related if key in evidence),
+                *(row for row in activities if row["mention_id"] in mention_ids),
+            ]
+            if row.get("citation_kind", "text") == "text"
+        }
+        excerpts = []
+        for quote in sorted(
+            quotes,
+            key=lambda quote: (
+                not bool(re.search(r"避开|不去|不是让|不扎堆|预约", quote[:220])),
+                not bool(re.search(r"预估|消费|费用|价|票", quote[:220])),
+                not bool(re.search(r"人多|排队|人声鼎沸", quote[:220])),
+                len(quote) > 220,
+                -min(len(quote), 220),
+                quote,
+            ),
+        ):
+            if any(quote in previous or previous in quote for previous in excerpts):
+                continue
+            excerpts.append(quote)
+            if len(excerpts) == 4:
+                break
+        excerpts = [
+            f"“{quote[:220]}{'…' if len(quote) > 220 else ''}”" for quote in excerpts
+        ]
         result.append(
             CandidateDraft(
                 name=city,
@@ -674,24 +764,23 @@ def build_directions(candidates):
                 category="play"
                 if any(item["category"] == "play" for item in members)
                 else members[0]["category"],
-                mention_ids=sorted(
-                    {
-                        identifier
-                        for item in members
-                        for identifier in item["mention_ids"]
-                    }
+                mention_ids=sorted(mention_ids),
+                evidence_ids=sorted(related),
+                summary=(
+                    f"已查来源中取得{len(locations[city])}个{city}地点线索。"
+                    + "；".join(comparison)
+                    + (
+                        "。历史来源摘录：" + "；".join(excerpts)
+                        if excerpts
+                        else "。玩法与条件暂无可用文本证据"
+                    )
                 ),
-                evidence_ids=sorted(
-                    {
-                        identifier
-                        for item in members
-                        for identifier in item["evidence_ids"]
-                    }
-                ),
-                summary=f"已查来源中取得{len(members)}个{city}地点线索，可比较各地点依据后选择方向。",
                 uncertainty=[
                     "方向来自有限来源，尚未由用户采用",
                     "交通可行性与地点位置尚未核实",
+                    "主题、时间、预算适配与来源当前有效性尚未核实",
+                    "来源提及包含限制和对照对象，采用前请核对原文",
+                    *missing,
                     *(
                         ["图片待核验"]
                         if any(
@@ -822,7 +911,11 @@ def assemble_candidates(
             effective["transport_source"] = field["provenance"]
     effective = TripRequest.model_validate(effective).model_dump(mode="json")
     candidates = build_candidates(extractions, sources)
-    directions = build_directions(candidates) if not effective["destination"] else []
+    directions = (
+        build_directions(candidates, extractions)
+        if not effective["destination"]
+        else []
+    )
     source_map = (
         sources if isinstance(sources, dict) else {row["id"]: row for row in sources}
     )

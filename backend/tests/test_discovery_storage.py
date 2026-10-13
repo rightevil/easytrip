@@ -17,6 +17,7 @@ from easytrip.domain.discovery import (
 )
 from easytrip.domain.models import ArchiveTrip, CreateTrip, MessageCreate, TripPatch
 from easytrip.domain.tasks import CreateRun
+from easytrip.services.evidence import build_candidates, build_directions
 from easytrip.storage.database import Database, NotFound, OperationConflict
 
 
@@ -86,6 +87,50 @@ def extraction(source, **kwargs):
 
 def save(db, trip, run, **kwargs):
     return db.save_discovery_batch(trip["id"], run["id"], run["generation"], **kwargs)
+
+
+def test_direction_region_cost_retains_unlinked_evidence_and_original_source(database):
+    trip = create(database)
+    run = running(database, trip)
+    source = database.save_source(
+        trip["id"],
+        run["id"],
+        run["generation"],
+        SourceNote(
+            external_id="regional-guide",
+            title="杭州散步",
+            text="西湖散步很舒服。预估日均消费150元。",
+        ),
+        query="杭州散步",
+    )
+    mention, _, _ = extraction(source)
+    mention.city = "杭州"
+    cost = Evidence(
+        id="region-cost",
+        source_id=source["id"],
+        object_text="杭州",
+        dimension="费用预估",
+        nature="suggestion",
+        stance="unknown",
+        quote="预估日均消费150元",
+    )
+    data = {
+        "mentions": [mention.model_dump(mode="json")],
+        "activities": [],
+        "evidence": [cost.model_dump(mode="json")],
+    }
+    directions = build_directions(build_candidates([data], [source]), [data])
+    save(
+        database, trip, run, mentions=[mention], evidence=[cost], candidates=directions
+    )
+    direction = database.list_candidates(trip["id"], run["id"])["items"][0]
+    assert "预估日均消费150元" in direction["summary"]
+    read = database.candidate_evidence(trip["id"], direction["id"])
+    assert len(read) == 1 and read[0]["link_status"] == "unlinked"
+    assert read[0]["source"]["text"] == source["text"]
+    assert (
+        database.candidate_sources(trip["id"], direction["id"])[0]["id"] == source["id"]
+    )
 
 
 def test_p1_database_migrates_without_losing_data(tmp_path):

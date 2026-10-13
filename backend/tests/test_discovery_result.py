@@ -93,6 +93,171 @@ def test_saved_confirmed_destination_is_not_replaced_by_an_inference():
     assert all(query["query"].startswith("杭州 ") for query in result["gap_queries"])
 
 
+def test_direction_compares_source_play_and_conditions_without_inventing_details():
+    extracted = sample(city="泉州", name="承天禅寺")
+    extracted["mentions"].append(
+        {
+            **extracted["mentions"][0],
+            "id": "region",
+            "name": "泉州",
+            "kind": "area",
+            "quote": "泉州只要不扎堆西街就适合放空",
+        }
+    )
+    extracted["activities"] = [
+        {
+            "id": "walk",
+            "mention_id": "mention-note-a",
+            "source_id": "note-a",
+            "quote": "承天禅寺适合安静散步",
+            "description": "当前门票999元",
+        },
+        {
+            "id": "avoid",
+            "mention_id": "region",
+            "source_id": "note-a",
+            "quote": "泉州游玩建议避开西街",
+            "description": "避开热门街区",
+        },
+    ]
+    extracted["evidence"] = [
+        {
+            "id": "price",
+            "source_id": "note-a",
+            "mention_id": None,
+            "object_text": "泉州",
+            "dimension": "cost",
+            "nature": "suggestion",
+            "stance": "unknown",
+            "link_status": "unlinked",
+            "quote": "预估日均消费：150-200元",
+        },
+        {
+            "id": "other-city-price",
+            "source_id": "note-a",
+            "mention_id": None,
+            "object_text": "高邮",
+            "dimension": "cost",
+            "nature": "suggestion",
+            "stance": "unknown",
+            "link_status": "unlinked",
+            "quote": "高邮日均消费120元",
+        },
+    ]
+    sources = [source(city="泉州", name="承天禅寺")]
+    sources[0]["text"] = "\n".join(
+        row["quote"] for row in extracted["activities"] + extracted["evidence"]
+    )
+    result = assemble_candidates("run-a", {}, {}, [extracted], sources)
+    direction = result["directions"][0]
+    assert direction["mention_ids"] == ["mention-note-a", "region"]
+    assert direction["evidence_ids"] == ["price"]
+    assert "1个泉州地点线索" in direction["summary"]
+    assert "玩：承天禅寺" in direction["summary"]
+    assert "吃：尚未取得具体地点" in direction["summary"]
+    for quote in (
+        "承天禅寺适合安静散步",
+        "泉州游玩建议避开西街",
+        "预估日均消费：150-200元",
+    ):
+        assert quote in direction["summary"]
+    assert "999元" not in direction["summary"] and "120元" not in direction["summary"]
+    assert "交通可行性与地点位置尚未核实" in direction["uncertainty"]
+    assert result["effective_request"]["destination"] is None
+
+
+def test_unlinked_region_evidence_from_unrelated_source_cannot_enter_direction():
+    first, second = (
+        sample(city="泉州", name="洛阳桥"),
+        sample(city="临海", name="东湖", source_id="note-b"),
+    )
+    second["evidence"] = [
+        {
+            "id": "wrong-source",
+            "source_id": "note-b",
+            "mention_id": None,
+            "object_text": "泉州",
+            "dimension": "cost",
+            "nature": "unknown",
+            "stance": "unknown",
+            "link_status": "unlinked",
+            "quote": "日均消费999元",
+        }
+    ]
+    result = assemble_candidates(
+        "run-a",
+        {},
+        {},
+        [first, second],
+        [
+            source(city="泉州", name="洛阳桥"),
+            source("note-b", city="临海", name="东湖"),
+        ],
+    )
+    assert all(
+        "999元" not in row["summary"] and "wrong-source" not in row["evidence_ids"]
+        for row in result["directions"]
+    )
+
+
+@pytest.mark.parametrize(
+    "kind, expected", [("area", ["B", "A"]), ("place", ["A", "B"])]
+)
+def test_region_itself_does_not_inflate_direction_rank(kind, expected):
+    extractions = [
+        sample(city="A", name="A"),
+        sample(city="B", name="公园", source_id="note-b"),
+    ]
+    extractions[0]["mentions"][0]["kind"] = kind
+    result = assemble_candidates(
+        "run-a",
+        {},
+        {},
+        extractions,
+        [source(city="A", name="A"), source("note-b", city="B", name="公园")],
+    )
+    assert [row["city"] for row in result["directions"]] == expected
+    direction = next(row for row in result["directions"] if row["city"] == "A")
+    assert f"{int(kind != 'area')}个A地点线索" in direction["summary"]
+    assert direction["mention_ids"] == ["mention-note-a"]
+
+
+def test_direction_excerpts_are_bounded_and_images_are_not_textual_comparison():
+    extracted = sample(city="杭" * 200, name="景" * 300, picture=True)
+    extracted["activities"] = [
+        {
+            "id": f"activity-{index}",
+            "source_id": "note-a",
+            "mention_id": "mention-note-a",
+            "quote": str(index) + "游玩" * 500,
+            "description": "游玩",
+        }
+        for index in range(5)
+    ] + [
+        {
+            "id": "image-only",
+            "source_id": "note-a",
+            "mention_id": "mention-note-a",
+            "quote": "图片有一张价格表",
+            "description": "价格表",
+            "citation_kind": "image",
+            "image_index": 1,
+        }
+    ]
+    result = assemble_candidates(
+        "run-a",
+        {},
+        {},
+        [{"data": None}, extracted],
+        [source(city="杭" * 200, name="景" * 300)],
+    )
+    direction = result["directions"][0]
+    assert len(direction["summary"]) <= 2000
+    assert direction["summary"].count("\u2026") == 5
+    assert "图片有一张价格表" not in direction["summary"]
+    assert "图片待核验" in direction["uncertainty"]
+
+
 def test_confirmed_conversation_timing_drives_gaps_without_saving_it_to_trip():
     result = assemble_candidates(
         "run-a",
