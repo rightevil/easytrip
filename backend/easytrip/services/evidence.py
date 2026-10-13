@@ -73,6 +73,10 @@ def _extraction_request_schema():
                 "else": {"properties": {"quote": reference}},
             }
         ]
+    schema["$defs"]["Activity"]["properties"]["description"]["description"] = (
+        "文本活动直接复制自身quote中的连续逐字短片段，不添加引用之外的价格、时长、预约等细节。"
+        "图片活动仅描述待核实观察。"
+    )
     evidence = schema["$defs"]["Evidence"]
     evidence["required"].extend(["object_text", "link_status"])
     evidence["properties"]["object_text"]["description"] = (
@@ -215,6 +219,20 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
                 cited(row, path)
             except ValueError as error:
                 errors.append(str(error))
+            if (
+                field == "activities"
+                and row.get("citation_kind", "text") == "text"
+                and isinstance(row.get("description"), str)
+                and isinstance(row.get("quote"), str)
+                and (
+                    not row["description"].strip()
+                    or row["description"] not in row["quote"]
+                )
+            ):
+                errors.append(
+                    f"{path}.description: 活动内容必须是自身quote中的连续逐字原文片段；"
+                    "不能用标题以外的正文、其他地点或其他来源补描述，必要时扩大同来源连续行引用"
+                )
             if field == "mentions":
                 identity = row.get("id")
                 if isinstance(identity, str):
@@ -483,6 +501,7 @@ async def extract_note(
         "name直接复制原文连续片段，范围引用恢复为原文，保留其中emoji、括号、标点和换行，禁止拼接不同段落、补省略号或改写规范名称。"
         "例如原文'青山⛰️步道'可以name='青山'并选择含该原文的行，不能name='青山步道'；名称规范化留待地点匹配。"
         "activities保留不同体验及作者原攻略顺序、停留/价格/开放/预约等历史描述，quote须包含所属提及的原名，description不升级为当前事实；无法逐字引用时不编造活动。"
+        "文本activities.description直接复制自身quote中的连续原文短片段，不另写概括句、不附加其它行的票价/时间/预约；引用含名称与描述时可截取有信息的描述片段，不强求description也重复名称。"
         "若名称在上一段、活动在下一段，必须选择包含中间文字的完整连续行范围；不能把名称和活动句拼成新quote。修正name后同步核对关联活动quote。"
         "city不明用null；同名分店/馆区/营地分别保留，村口农家菜等泛称kind=generic；路线category=transport，不能冒充可靠车次。"
         "每条输入评论至少分类一次，包括unknown；多对象、多维度、多问题拆条。nature区分experience亲历、question提问、hearsay转述、wish期待、suggestion建议、content_reaction内容态度、unknown。"

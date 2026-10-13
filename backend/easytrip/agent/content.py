@@ -11,7 +11,7 @@ from ..services.collection import CollectionService
 from ..services.evidence import NoteExtraction, assemble_candidates, extract_note
 
 # Bump when extraction prompts or semantic validation change.
-EXTRACTION_CONTRACT = "p2-evidence-explicit-comment-objects-v5"
+EXTRACTION_CONTRACT = "p2-evidence-grounded-activity-description-v6"
 
 
 def note_hash(note):

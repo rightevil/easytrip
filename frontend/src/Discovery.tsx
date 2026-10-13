@@ -183,7 +183,7 @@ function Coverage({ run }: { run: Run }) {
     {cumulative && <p>本行程累计：外部调用 {count(cumulative.external_calls)} · token {count(cumulative.model_tokens)} · 图片提交 {count(cumulative.images)} 次 · {cumulative.unknown_cost_calls} 次用量不完整 · 费用{cumulative.cost_cny === null ? '未知' : `${cumulative.cost_cny} 元`}。</p>}
     {run.usage.interrupted_stage_time_unknown && <p>服务中断阶段耗时未知；已确认用量仍保留。</p>}
     {partialReasons.length > 0 && <p>未完成项：{partialReasons.map(reason => pauseReasons[reason] ?? reason).join('；')}</p>}
-    {result?.model?.semantic_quality === 'not_validated' && <p>模型语义质量尚未人工验收，候选与评价需要人工核对。</p>}
+    {result?.model?.semantic_quality === 'not_validated' && <p>模型语义质量未验证，候选与评价请结合原文核对。</p>}
   </section>;
 }
 function UnderstandingView({ understanding }: { understanding: Understanding }) {

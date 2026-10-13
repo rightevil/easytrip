@@ -52,7 +52,7 @@ def extraction():
                 "mention_id": "westlake",
                 "source_id": "note-a",
                 "quote": "西湖适合散步",
-                "description": "来源建议散步",
+                "description": "适合散步",
             }
         ],
         "evidence": [
@@ -1081,3 +1081,69 @@ def test_exploration_directions_are_bounded_and_backed_by_candidate_mentions():
         for item in directions
     )
     assert all("尚未由用户采用" in " ".join(item["uncertainty"]) for item in directions)
+
+
+@pytest.mark.parametrize(
+    "description", ["票价15元", "建议预约", "排队一小时", "来源建议散步", "   "]
+)
+def test_text_activity_description_cannot_borrow_details_outside_its_own_quote(
+    description,
+):
+    sample = note()
+    sample["text"] += "\n西湖票价15元，建议预约。"
+    bad, good = extraction(), extraction()
+    bad["activities"][0].update(quote="杭州西湖", description=description)
+    result, calls = run([bad, good], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 2
+    assert "activities[0].description" in calls[1].content.decode()
+    assert result["data"]["activities"][0]["description"] == "适合散步"
+
+
+def test_activity_description_guard_joins_name_and_structural_errors_in_single_repair():
+    bad = extraction()
+    bad["activities"][0].update(quote="杭州西湖", description="票价15元")
+    bad["mentions"][0]["name"] = "不存在的地点"
+    bad["evidence"][0].pop("dimension")
+    result, calls = run([bad, extraction()])
+    repair = calls[1].content.decode()
+    assert result["status"] == "passed" and len(calls) == 2
+    assert "activities[0].description" in repair
+    assert "mentions[0].name" in repair and "evidence.0.dimension" in repair
+
+
+def test_supported_activity_description_uses_resolved_text_lines_and_retains_raw_wording():
+    sample = note()
+    sample["text"] = "西湖游玩。\n历史门票15元/人，需提前预约。\n河坊街可以吃饭。"
+    data = extraction()
+    data["mentions"][0]["quote"] = {"part": "text", "start_line": 1, "end_line": 1}
+    data["activities"][0].update(
+        quote={"part": "text", "start_line": 1, "end_line": 2},
+        description="历史门票15元/人，需提前预约。",
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    activity = result["data"]["activities"][0]
+    assert activity["description"] == "历史门票15元/人，需提前预约。"
+    assert activity["description"] in activity["quote"]
+
+
+def test_visual_activity_remains_an_unverified_observation_without_text_literal_requirement():
+    data = extraction()
+    data["mentions"][0].update(
+        quote="西湖岸边的步道", citation_kind="image", image_index=1
+    )
+    data["activities"][0].update(
+        quote="西湖岸边的步道",
+        description="沿湖步道散步的视觉线索",
+        citation_kind="image",
+        image_index=1,
+    )
+    data["image_observations"] = [
+        {"source_id": "note-a", "image_index": 1, "text": "西湖岸边的步道"}
+    ]
+    result, calls = run(
+        [data], sample={**note(), "images": ["https://sns-img.xhscdn.com/photo"]}
+    )
+    assert result["status"] == "passed" and len(calls) == 1
+    candidate = build_candidates([result], sources())[0]
+    assert "图片待核验" in candidate["uncertainty"]
