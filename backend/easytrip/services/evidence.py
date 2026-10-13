@@ -369,11 +369,13 @@ async def extract_note(
         "每条evidence显式写object_text，填评价对象原名或原文指代；对象确实不明时用空字符串，不省略字段。"
         "dimension写原文支持的主要维度，确实不明用unknown；中性费用/时间事实可以stance=unknown，不能因此省略已明确的对象和维度。"
         "点赞/收藏/种草/期待/夸图片不能算亲历，未明确到访不猜测experience；行程过满、整体路线/时间反馈对象为行程或原文全程，object_text写该对象、mention_id=null、link_status=unlinked。"
-        "对象或指代不明写object_text为空、link_status=uncertain、mention_id=null；不能把所有评论分给所有地点；1号营地问题不能放大为整个小杭坑政策。"
+        "笔记和图片含多个线路/景点时，不能仅凭标题把主体不明评论关联主地点；明确的整体路线、票务、比较、出行意向可概括object_text和主要dimension、mention_id=null、link_status=unlinked，真正指代歧义则object_text为空、mention_id=null、link_status=uncertain，不能把所有评论分给所有地点；局部营地/分店问题不得扩大为整片区域的政策。"
+        "同一评论的停运断言、亲自白跑和问句应按连续原文分段提取，不由到场推出停运时长；指南中的价格、时间和规则描述也不自动算作者亲历。"
         "每条证据明确写link_status：linked须有明确mention_id，unlinked须mention_id=null；不能遗漏状态而假定已关联。"
         "好像/听说保持不确定，疑问不能变成当前关闭、售罄、预约、气候事实。只输出quote支持的对象，不虚构答案、坐标、当前票价。"
         "图片独有地点可citation_kind=image且image_index为原序号，quote是同张image_observations.text逐字片段；观察只来自实际提交图，uncertain=true。"
         "图片证据nature=unknown、stance=unknown、link_status=uncertain；不得作为已确认当前事实。未提交图与视频未分析。"
+        "图片文字看不清时不猜字或拼成单一地名；游览链与船停靠点、不同线路或区段须分别保留，图文冲突保留来源差异，不能合并为确定事实。"
         "引用尽量短而保留对象和关键条件（老人/小孩/预约/时段）；不要省略比较对象和多个问题。只输出schema JSON: "
         + json.dumps(NoteExtraction.model_json_schema(), ensure_ascii=False)
     )

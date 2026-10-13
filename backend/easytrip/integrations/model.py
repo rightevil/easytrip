@@ -397,7 +397,9 @@ async def structured_call(
                 "role": "user",
                 "content": "校验未通过："
                 + error_summary
-                + "。只修正结构、来源或证据错误后重新输出 JSON；可保留先前提交图片的观察，不新增图片观察。",
+                + "。仅修正已报告的错误，完整保留未报错字段及其原文quote；不要缩短或改写有效引用。"
+                "重新输出符合完整schema的全部JSON，不输出局部补丁，也不要删除schema的必填字段。"
+                "可保留先前提交图片的观察，不新增图片观察。",
             },
         ]
     response = {
