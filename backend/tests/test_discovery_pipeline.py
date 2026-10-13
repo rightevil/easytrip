@@ -25,6 +25,7 @@ def setup(
     fail_second=False,
     invalid_extraction=False,
     with_images=False,
+    generic=False,
 ):
     database = Database(tmp_path / "pipeline.sqlite3")
     database.initialize()
@@ -46,6 +47,8 @@ def setup(
             return {"feeds": [{"id": identity, "xsecToken": "private-transport"}]}
         identity = arguments["feed_id"]
         place = {"play": "西湖", "meal": "阿婆饭店", "stay": "西湖宾馆"}[identity]
+        if generic:
+            place = "山脚民宿"
         return payload(
             [
                 comment(identity + "-p", place + "体验很好"),
@@ -88,12 +91,15 @@ def setup(
             category = (
                 "eat" if "饭店" in place else "stay" if "宾馆" in place else "play"
             )
+            if generic:
+                category = "stay"
             data = {
                 "mentions": [
                     {
                         "id": "m1",
                         "source_id": inputs["source_id"],
                         "name": place,
+                        "kind": "generic" if generic else "place",
                         "city": "杭州",
                         "category": category,
                         "quote": {
@@ -203,6 +209,33 @@ def test_full_pipeline_keeps_real_counts_and_source_quotes(tmp_path, monkeypatch
             for row in database.candidate_evidence(trip["id"], candidate["id"])
         )
         assert final["result"]["model"]["semantic_quality"] == "not_validated"
+
+    asyncio.run(check())
+
+
+def test_generic_only_result_keeps_source_hints_and_reports_no_specific_place(
+    tmp_path, monkeypatch
+):
+    async def check():
+        database, trip, runner, _, calls = setup(tmp_path, monkeypatch, generic=True)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1, "reserved_gap_searches": 0},
+            ),
+        )
+        run = database.claim_run()
+        await runner.execute(run)
+        final = database.get_run(run["id"])
+        candidates = database.list_candidates(trip["id"], run["id"])["items"]
+        assert len(calls) == 2 and len(candidates) == 1
+        assert candidates[0]["kind"] == "generic"
+        assert "no_source_backed_candidates" in final["result"]["partial_reasons"]
+        assert "0个待定位地点、1条泛称线索、0个探索方向" in final["result"]["summary"]
+        assert database.candidate_sources(trip["id"], candidates[0]["id"])
 
     asyncio.run(check())
 

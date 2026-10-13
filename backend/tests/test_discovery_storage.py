@@ -459,11 +459,14 @@ def test_reads_select_current_latest_output_and_allow_explicit_history(database)
     )
     candidates = [
         CandidateDraft(name="桂花面馆", category="eat", mention_ids=[m2.id]),
-        CandidateDraft(name="面馆分店", category="eat", mention_ids=[m2.id]),
+        CandidateDraft(
+            name="面馆分店", category="eat", kind="generic", mention_ids=[m2.id]
+        ),
     ]
     save(database, trip, newer, mentions=[m2], candidates=candidates)
     page = database.list_candidates(trip["id"], category="eat", limit=1, offset=1)
     assert page["total"] == 2 and page["items"][0]["id"] == candidates[1].id
+    assert page["items"][0]["kind"] == "generic"
     assert database.list_candidates(trip["id"], category="play")["total"] == 0
     assert (
         database.list_candidates(trip["id"], run["id"])["items"][0]["id"]

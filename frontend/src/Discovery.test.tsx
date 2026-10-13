@@ -177,6 +177,17 @@ describe('source-grounded discovery', () => {
     expect(screen.queryByText('新轮正文不该出现在旧轮')).toBeNull();
   });
 
+  it('keeps generic food as a source hint without presenting a located place or an adoptable direction', async () => {
+    const current = session(trip('one', [run('one')]));
+    vi.mocked(api.candidates).mockResolvedValue(page(candidate('one', { kind: 'generic', category: 'eat', name: '麦虾' })));
+    render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
+    await screen.findByRole('heading', { name: '麦虾' });
+    expect(screen.getByText('泛称线索')).toBeTruthy();
+    expect(screen.queryByText('待定位')).toBeNull();
+    expect(screen.queryByRole('button', { name: '采用这个方向' })).toBeNull();
+    expect(screen.getByRole('button', { name: '查看来源与证据' })).toBeTruthy();
+  });
+
   it('shows actual coverage and unknown charges with an honest service pause', () => {
     const paused = run('one', { status: 'paused', stage: 'fetching', stop_reason: 'source_login_or_access_required', usage: { steps: 9, elapsed_seconds: 22, external_calls: 6, model_tokens: 1200, images: 3, searches: 2, model_calls: 2, notes_obtained: 4, notes_analyzed: 2, notes_failed: 1, comments_obtained: 40, comments_selected: 20, comments_analyzed: 15, comments_judged: 12, judgement_rows: 19, images_obtained: 8, unknown_cost_calls: 1 }, trip_usage: { external_calls: 9, model_tokens: 1800, images: 5, unknown_cost_calls: 2, cost_cny: null } });
     render(<Discovery session={session(trip('one', [paused]))} requestVersion={1} category="all" archived={false} />);

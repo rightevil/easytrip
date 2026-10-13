@@ -991,7 +991,36 @@ def test_generic_lodging_and_same_name_branches_stay_separate():
     candidates = build_candidates([result], sources())
     assert len([item for item in candidates if item["name"] == "豆浆店"]) == 2
     generic = next(item for item in candidates if item["name"] == "山脚民宿")
+    assert generic["kind"] == "generic"
     assert "泛称，具体店铺或住宿名称待确认" in generic["uncertainty"]
+
+
+def test_generic_mentions_do_not_inflate_direction_ranking_or_member_counts():
+    candidates = [
+        {
+            "city": city,
+            "category": "play",
+            "kind": "place",
+            "mention_ids": [f"place-{city}-{index}"],
+            "evidence_ids": [],
+        }
+        for city, count in [("A", 1), ("B", 2), ("C", 3), ("D", 4)]
+        for index in range(count)
+    ]
+    generic = [
+        {
+            "city": "A",
+            "category": "eat",
+            "kind": "generic",
+            "mention_ids": [f"dish-{index}"],
+            "evidence_ids": [],
+        }
+        for index in range(10)
+    ]
+    directions = build_directions(candidates + generic)
+    assert [row["city"] for row in directions] == ["D", "C", "B"]
+    assert [len(row["mention_ids"]) for row in directions] == [4, 3, 2]
+    assert build_directions(generic) == []
 
 
 def test_gaps_depend_on_confirmed_trip_times_and_do_not_erase_food_mentions():

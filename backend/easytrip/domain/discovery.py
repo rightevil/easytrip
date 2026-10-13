@@ -148,7 +148,7 @@ class CandidateDraft(Model):
     id: Identifier = Field(default_factory=lambda: str(uuid4()))
     name: Annotated[str, Field(min_length=1, max_length=300)]
     category: Category
-    kind: Literal["place", "direction"] = "place"
+    kind: Literal["place", "direction", "generic"] = "place"
     city: Annotated[str, Field(max_length=200)] | None = None
     direction: Annotated[str, Field(max_length=300)] | None = None
     mention_ids: list[Identifier] = Field(default_factory=list, max_length=1000)

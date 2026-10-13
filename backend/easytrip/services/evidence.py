@@ -634,6 +634,7 @@ def build_candidates(extractions, sources):
         candidates.append(
             CandidateDraft(
                 name=name,
+                kind="generic" if kind == "generic" else "place",
                 category=category,
                 city=city,
                 direction=city,
@@ -658,7 +659,7 @@ def build_directions(candidates):
     """Compare up to three source-backed regions, without auto-selecting one for Trip."""
     regions = {}
     for candidate in candidates:
-        if candidate.get("city"):
+        if candidate.get("city") and candidate.get("kind") != "generic":
             regions.setdefault(candidate["city"], []).append(candidate)
     result = []
     for city, members in sorted(

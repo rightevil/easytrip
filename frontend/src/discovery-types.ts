@@ -68,7 +68,7 @@ export interface Candidate {
   category: 'eat' | 'play' | 'stay';
   city: string | null;
   direction: string | null;
-  kind: 'place' | 'direction';
+  kind: 'place' | 'direction' | 'generic';
   mention_ids: string[];
   evidence_ids: string[];
   match_status: 'unmatched';

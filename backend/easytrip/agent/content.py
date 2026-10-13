@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import Counter
 
 from ..domain.evidence_metrics import object_dimension_judged
 from ..integrations.model import TOKEN_BUDGETS
@@ -415,7 +416,8 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
         or progress["comments_reused_analyzed"] < progress["comments_reused"]
     ):
         reasons.append("comments_partly_unanalysed")
-    if not content["candidates"]:
+    counts = Counter(row["kind"] for row in content["candidates"])
+    if not counts["place"]:
         reasons.append("no_source_backed_candidates")
     if (
         not content["effective_request"]["destination"]
@@ -443,7 +445,11 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
     ):
         reasons.append("gap_search_unfinished")
     summary = {
-        "summary": f"本轮新增取得{usage['notes_obtained']}篇笔记，分析{usage['comments_analyzed']}条评论；复用{progress['notes_reused']}篇已有笔记，取得{len(content['candidates'])}个待定位线索。",
+        "summary": (
+            f"本轮新增取得{usage['notes_obtained']}篇笔记，分析{usage['comments_analyzed']}条评论；"
+            f"复用{progress['notes_reused']}篇已有笔记，取得{counts['place']}个待定位地点、"
+            f"{counts['generic']}条泛称线索、{counts['direction']}个探索方向。"
+        ),
         "understanding": current["checkpoint"].get("understanding"),
         "directions": content["directions"],
         "gaps": content["gaps"],
