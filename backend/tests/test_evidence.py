@@ -7,6 +7,7 @@ import pytest
 
 from easytrip.config import Settings
 from easytrip.services.evidence import (
+    NoteExtraction,
     build_candidates,
     build_directions,
     build_gaps,
@@ -117,6 +118,189 @@ def sources():
         "note-a": {"kind": "note", "author_key": "a" * 64},
         "comment-a": {"kind": "comment", "author_key": "b" * 64},
     }
+
+
+def line_ref(part="text", start=1, end=1):
+    return {"part": part, "start_line": start, "end_line": end}
+
+
+def test_line_refs_restore_exact_unicode_newlines_and_ledger_strings():
+    sample, data = note(), extraction()
+    sample["title"] = "杭州\r\n青山⛰️步道"
+    sample["text"] = "青山⛰️步道\r\n\r\n沿路有树林\n适合散步"
+    data["mentions"][0].update(name="青山", quote=line_ref("title", 2, 2))
+    data["activities"][0]["quote"] = line_ref("text", 1, 4)
+    data["evidence"][0].update(mention_id=None, link_status="unlinked")
+    ledger = []
+
+    async def after(identity, record):
+        ledger.append(record)
+
+    result, calls = run([data], sample=sample, after=after)
+    assert result["status"] == "passed" and len(calls) == 1
+    assert result["data"]["mentions"][0]["quote"] == "青山⛰️步道"
+    assert result["data"]["activities"][0]["quote"] == sample["text"]
+    assert ledger[0]["model_data"] == result["data"]
+    assert all(
+        isinstance(row["quote"], str)
+        for field in ("mentions", "activities", "evidence")
+        for row in result["data"][field]
+    )
+    payload = json.loads(calls[0].content)
+    context = json.loads(payload["messages"][1]["content"][0]["text"])
+    assert context["title"] == [
+        {"line": 1, "text": "杭州\r\n"},
+        {"line": 2, "text": "青山⛰️步道"},
+    ]
+    assert context["text"][1] == {"line": 2, "text": "\r\n"}
+    assert "".join(row["text"] for row in context["text"]) == sample["text"]
+    assert context["comments"][0]["source_id"] == "comment-a"
+    assert context["comments"][0]["text"] == [
+        {"line": 1, "text": sample["comments"][0]["text"]}
+    ]
+    schema = json.loads(
+        payload["messages"][0]["content"].split("只输出schema JSON: ", 1)[1]
+    )
+    for name in ("PlaceMention", "Activity"):
+        condition = schema["$defs"][name]["allOf"][0]
+        assert condition["if"]["required"] == ["citation_kind"]
+        assert condition["else"]["properties"]["quote"]["type"] == "object"
+        assert condition["then"]["properties"]["quote"]["type"] == "string"
+        assert (
+            NoteExtraction.model_json_schema()["$defs"][name]["properties"]["quote"][
+                "type"
+            ]
+            == "string"
+        )
+    assert schema["$defs"]["Evidence"]["properties"]["quote"]["type"] == "string"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {},
+        {"part": "text", "start_line": 1},
+        {**line_ref(), "source_id": "note-a"},
+        line_ref("title+text"),
+        line_ref(None),
+        line_ref(start=True),
+        line_ref(end=False),
+        line_ref(start=1.0),
+        line_ref(end="1"),
+        line_ref(start=0),
+        line_ref(start=-1),
+        line_ref(start=2, end=1),
+        line_ref(end=2),
+    ],
+)
+def test_invalid_line_refs_are_rejected_with_only_one_repair(reference):
+    data = extraction()
+    data["mentions"][0]["quote"] = reference
+    result, calls = run([data, data])
+    assert result["status"] == "failed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "mentions[0].quote" in repair
+
+
+@pytest.mark.parametrize("part,source_text", [("title", ""), ("text", "\n")])
+def test_empty_or_whitespace_line_refs_cannot_become_quotes(part, source_text):
+    sample, data = note(), extraction()
+    sample[part] = source_text
+    data["mentions"][0]["quote"] = line_ref(part)
+    result, calls = run([data, data], sample=sample)
+    assert result["status"] == "failed" and len(calls) == 2
+    assert (
+        "mentions[0].quote" in json.loads(calls[1].content)["messages"][-1]["content"]
+    )
+
+
+def test_line_refs_do_not_expand_ranges_or_borrow_another_source():
+    sample, data = note(), extraction()
+    sample["text"] = "河坊街可以吃饭。\n西湖适合散步。"
+    sample["comments"][0]["text"] = "这里怎么走？"
+    data["mentions"][0]["quote"] = line_ref("text", 1, 1)
+    data["activities"][0].update(source_id="comment-a", quote=line_ref())
+    data["evidence"][0].update(
+        mention_id=None,
+        object_text="",
+        quote="这里怎么走？",
+        link_status="uncertain",
+    )
+    result, calls = run([data, data], sample=sample)
+    assert result["status"] == "failed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "mentions[0].name" in repair and "activities[0].quote" in repair
+
+
+def test_line_ref_errors_share_the_single_repair_with_other_strict_failures():
+    bad, good = extraction(), extraction()
+    bad["mentions"][0].update(source_id="foreign-source", quote=line_ref())
+    bad["activities"][0]["quote"] = line_ref(end=2)
+    bad["evidence"][0]["quote"] = "没有这段原文"
+    good["mentions"][0]["quote"] = line_ref()
+    good["activities"][0]["quote"] = line_ref()
+    result, calls = run([bad, good])
+    assert result["status"] == "passed" and len(calls) == 2
+    first, second = [json.loads(call.content)["messages"] for call in calls]
+    assert first[1]["content"][0]["text"] == second[1]["content"]
+    assert all(
+        path in second[-1]["content"]
+        for path in ("mentions[0].quote", "activities[0].quote", "evidence[0].quote")
+    )
+    assert result["coverage"]["comments_analysed"] == 1
+
+
+def test_image_line_refs_fail_but_original_observation_strings_can_repair():
+    sample, good = note(), extraction()
+    sample["images"] = ["https://sns-img.xhscdn.com/photo"]
+    for field in ("mentions", "activities"):
+        good[field][0].update(
+            citation_kind="image", image_index=1, quote="西湖适合散步"
+        )
+    good["image_observations"] = [
+        {"source_id": "note-a", "image_index": 1, "text": "西湖适合散步"}
+    ]
+    bad = copy.deepcopy(good)
+    for field in ("mentions", "activities"):
+        bad[field][0]["quote"] = line_ref()
+    result, calls = run([bad, good], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"]
+    assert "mentions[0].quote" in repair[-1]["content"]
+    assert "activities[0].quote" in repair[-1]["content"]
+    assert "image_url" not in str(repair)
+    assert result["images_submitted"] == 1
+    assert result["data"]["mentions"][0]["quote"] == "西湖适合散步"
+
+
+def test_evidence_keeps_short_literal_quotes_with_mixed_question_context():
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = "我去了西湖，排队一小时；河坊街需要预约吗？"
+    data["mentions"][0]["quote"] = line_ref()
+    data["activities"][0]["quote"] = line_ref()
+    data["evidence"][0].update(quote="我去了西湖，排队一小时", stance="negative")
+    data["evidence"].append(
+        {
+            **data["evidence"][0],
+            "mention_id": None,
+            "object_text": "河坊街",
+            "dimension": "预约",
+            "quote": "河坊街需要预约吗？",
+            "nature": "question",
+            "stance": "question",
+            "link_status": "unlinked",
+        }
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    assert [row["nature"] for row in result["data"]["evidence"]] == [
+        "experience",
+        "question",
+    ]
+    bad = copy.deepcopy(data)
+    bad["evidence"][0]["quote"] = line_ref()
+    result, calls = run([bad, bad], sample=sample)
+    assert result["status"] == "failed" and len(calls) == 2
 
 
 def test_mixed_experience_counts_unique_comment_once_per_side_and_no_coordinates():
@@ -252,7 +436,9 @@ def test_single_repair_combines_schema_errors_and_safe_raw_reference_checks():
         ("image_observations", [{"source_id": [], "image_index": {}, "text": None}]),
     ],
 )
-def test_malformed_raw_fields_still_require_strict_schema_without_crashing(field, value):
+def test_malformed_raw_fields_still_require_strict_schema_without_crashing(
+    field, value
+):
     bad = extraction()
     bad[field] = value
     result, calls = run([bad, bad])

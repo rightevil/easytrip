@@ -79,7 +79,11 @@ def setup(
         else:
             if fail_second and len(requests) > 2:
                 raise httpx.ReadTimeout("result unknown")
-            title = inputs["title"]
+            title = "".join(line["text"] for line in inputs["title"])
+            inputs["comments"] = [
+                {**row, "text": "".join(line["text"] for line in row["text"])}
+                for row in inputs["comments"]
+            ]
             place = title.removeprefix("杭州")
             category = (
                 "eat" if "饭店" in place else "stay" if "宾馆" in place else "play"
@@ -92,7 +96,11 @@ def setup(
                         "name": place,
                         "city": "杭州",
                         "category": category,
-                        "quote": title,
+                        "quote": {
+                            "part": "title",
+                            "start_line": 1,
+                            "end_line": len(inputs["title"]),
+                        },
                     }
                 ],
                 "activities": [],

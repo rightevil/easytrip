@@ -10,7 +10,7 @@ from ..services.collection import CollectionService
 from ..services.evidence import NoteExtraction, assemble_candidates, extract_note
 
 # Bump when extraction prompts or semantic validation change.
-EXTRACTION_CONTRACT = "p2-evidence-object-dimension-v3"
+EXTRACTION_CONTRACT = "p2-evidence-source-line-quotes-v4"
 
 
 def note_hash(note):
