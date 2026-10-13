@@ -550,6 +550,155 @@ def test_wish_content_hearsay_and_question_are_not_experience_support(text, natu
     assert candidate["stats"]["negative_count"] == 0
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我去过西湖，怎么看哪里都很漂亮",
+        "我昨天去了西湖，机位和拍摄角度很适合摄影",
+        "我去了西湖，回来收藏了我拍的照片",
+        "我去了西湖，感觉好像更清静了",
+        "西湖哪里都很漂亮",
+        "西湖适合摄影，机位很多",
+    ],
+)
+def test_statement_and_direct_visit_are_not_retyped_by_isolated_keywords(text):
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(quote=text, nature="experience", stance="positive")
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert item["nature"] == "experience" and item["stance"] == "positive"
+    assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["西湖现在开放吗[微笑R]", "西湖需要预约么。", "请问西湖怎么走", "西湖需要预约？"],
+)
+def test_explicit_questions_still_cannot_become_experience_votes(text):
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(quote=text, nature="experience", stance="positive")
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert item["nature"] == item["stance"] == "question"
+    assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
+
+
+def test_real_mixed_crowd_comment_retains_experience_and_question_as_separate_judgements():
+    text = (
+        "他怎么做的去的时候都没有啥人？ 我们去的每次都人挤人？ 时间不对还是地点不对？"
+    )
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(
+        quote=text,
+        mention_id=None,
+        object_text="整体到访",
+        dimension="拥挤程度",
+        nature="experience",
+        stance="negative",
+        link_status="unlinked",
+    )
+    data["evidence"].append(
+        {
+            **data["evidence"][0],
+            "dimension": "客流变化原因",
+            "nature": "question",
+            "stance": "question",
+        }
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    assert [(row["nature"], row["stance"]) for row in result["data"]["evidence"]] == [
+        ("experience", "negative"),
+        ("question", "question"),
+    ]
+    assert all(
+        row["link_status"] == "unlinked" and row["mention_id"] is None
+        for row in result["data"]["evidence"]
+    )
+    assert build_candidates([result], sources())[0]["stats"]["negative_count"] == 0
+
+
+def test_historical_self_photography_is_not_relabelled_as_praise_for_author_images():
+    text = "我去年拍的时候没有收费"
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(
+        quote=text,
+        mention_id=None,
+        object_text="整体历史拍摄活动",
+        dimension="历史拍摄费用",
+        nature="experience",
+        stance="unknown",
+        link_status="unlinked",
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    assert result["data"]["evidence"][0]["nature"] == "experience"
+    assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "text,nature,stance,dimension",
+    [
+        ("昨天去拍的，这里景少人美", "experience", "negative", "景观丰富度"),
+        (
+            "这个不冷门吧?石梁飞瀑啊，属于台州标志性景点了",
+            "question",
+            "negative",
+            "是否冷门与知名度",
+        ),
+        ("被美景种草了，住宿有推荐的吗？", "wish", "positive", "兴趣与出行意愿"),
+    ],
+)
+def test_real_prereview_nature_and_stance_are_not_rewritten_by_neighbouring_words(
+    text, nature, stance, dimension
+):
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(
+        quote=text,
+        mention_id=None,
+        object_text="整体来源对象",
+        dimension=dimension,
+        nature=nature,
+        stance=stance,
+        link_status="unlinked",
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert (item["nature"], item["stance"]) == (nature, stance)
+    assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
+
+
+def test_named_rhetorical_question_keeps_negative_stance_without_becoming_experience_vote():
+    text = "西湖不冷门吧？属于标志性景点。"
+    sample, data = note(), extraction()
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(
+        quote=text, nature="question", stance="negative", dimension="是否冷门"
+    )
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    assert (
+        item["nature"] == "question"
+        and item["stance"] == "negative"
+        and item["link_status"] == "linked"
+    )
+    candidate = build_candidates([result], sources())[0]
+    assert (
+        candidate["stats"]["positive_count"]
+        == candidate["stats"]["negative_count"]
+        == 0
+    )
+
+
 def test_unclear_pronoun_is_preserved_but_cannot_be_counted_as_linked_experience():
     sample, data = note(), extraction()
     sample["comments"][0]["text"] = "这里排队久但很美"

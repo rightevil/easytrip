@@ -327,25 +327,27 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
         if item.mention_id is not None:
             item.mention_id = renamed[item.mention_id]
         if item.citation_kind == "text":
-            if (
-                item.nature == "question"
-                or item.stance == "question"
-                or re.search(
-                    r"[?？]|请问|是否|能不能|要不要|哪里|哪儿|多久|怎么|吗[，。！]?",
+            direct_visit = re.search(
+                r"(?:我|我们|本人)(?:亲自|昨天|今天|之前|去年|上周)?(?:去过|去了|去的|来过|来了|来的|到过|到了|到的|拍过|拍了|拍的)|亲自(?:来|去|到)",
+                item.quote,
+            )
+            if item.nature == "experience" and not direct_visit:
+                if re.search(
+                    r"[?？]|^\s*请问|(?:吗|么|嘛)(?:[，。！]|\[[^\]]*\]|\s)*$",
                     item.quote,
-                )
-            ):
-                item.nature, item.stance = "question", "question"
-            elif re.search(
-                r"好想|想请假去|想去看看|好想去|收藏了|这地方存了|种草了", item.quote
-            ):
-                item.nature = "wish"
-            elif re.search(r"听说|据说|好像|听朋友说", item.quote):
-                item.nature = "hearsay"
-            elif re.search(
-                r"拍得|拍的|摄影|拍摄角度|机位|攻略写|写得|图片好", item.quote
-            ):
-                item.nature = "content_reaction"
+                ):
+                    item.nature, item.stance = "question", "question"
+                elif re.search(
+                    r"好想|想请假去|想去看看|好想去|收藏了|这地方存了|种草了",
+                    item.quote,
+                ):
+                    item.nature = "wish"
+                elif re.search(r"听说|据说|听朋友说", item.quote):
+                    item.nature = "hearsay"
+                elif re.search(
+                    r"拍[得的](?:真|太|很|好|不错)|攻略写|写得|图片好", item.quote
+                ):
+                    item.nature = "content_reaction"
             if item.mention_id is not None:
                 mention = mentions[item.mention_id]
                 if mention.name not in item.quote:
@@ -505,6 +507,8 @@ async def extract_note(
         "若名称在上一段、活动在下一段，必须选择包含中间文字的完整连续行范围；不能把名称和活动句拼成新quote。修正name后同步核对关联活动quote。"
         "city不明用null；同名分店/馆区/营地分别保留，村口农家菜等泛称kind=generic；路线category=transport，不能冒充可靠车次。"
         "每条输入评论至少分类一次，包括unknown；多对象、多维度、多问题拆条。nature区分experience亲历、question提问、hearsay转述、wish期待、suggestion建议、content_reaction内容态度、unknown。"
+        "性质按该条quote的具体意思判断：'哪里都很美'是陈述，不因哪里/怎么/是否等单词改为问句；摄影/机位可以是本人到访体验，不自动算夸图片；好像表示不确定，不单凭此词当作听他人转述。亲历与提问/听说/收藏同句时按维度拆条并分别选短原文，不能因上下文中一个问号或关键词改写整条性质。"
+        "nature与stance分别判断：'这个不冷门吧？'可nature=question、stance=negative，表示质疑冷门，不是地点亲历差评；'被美景种草了，住宿有推荐吗'须拆为兴趣wish/positive与住宿question/question，不能把兴趣也变为提问。"
         "reply_to_source_id标明回复的父评论，只用父评论理解语境；回复quote仍逐字引用自身text，不能借用父评论文字冒充回复者亲历。"
         "每条evidence显式写object_text，填评价对象原名或原文指代；对象确实不明时用空字符串，不省略字段。"
         "linked表示已明确关联具体提及，object_text不得为空；整体路线/比较的对象明确但不是某个地点时，保留对象并unlinked；"
