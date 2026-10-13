@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Annotated
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from ..domain.discovery import (
     Activity,
@@ -40,10 +40,15 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
     raw = json.loads(content)
     if not isinstance(raw, dict):
         raise ValueError("抽取结果必须为对象")
-    for observation in raw.get("image_observations", []):
+
+    def rows(field):
+        value = raw.get(field, [])
+        return value if isinstance(value, list) else []
+
+    for observation in rows("image_observations"):
         if isinstance(observation, dict):
             observation["uncertain"] = True
-    for row in raw.get("evidence", []):
+    for row in rows("evidence"):
         if isinstance(row, dict):
             if "link_status" not in row and row.get("mention_id") is not None:
                 row["link_status"] = "uncertain"
@@ -53,60 +58,96 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
                 row["link_status"] = "unlinked"
             if row.get("citation_kind") == "image":
                 row.update(nature="unknown", stance="unknown", link_status="uncertain")
-    result = NoteExtraction.model_validate(raw, strict=True)
     image_refs = {(item["source_id"], item["image_index"]) for item in submitted_images}
-    observations, errors = {}, []
-    for index, observation in enumerate(result.image_observations):
-        key = (observation.source_id, observation.image_index)
-        if key not in image_refs or key in observations:
+    observations, image_keys, errors = {}, set(), []
+    for index, observation in enumerate(rows("image_observations")):
+        if not isinstance(observation, dict):
+            continue
+        source_id, image_index = observation.get("source_id"), observation.get("image_index")
+        if not isinstance(source_id, str) or type(image_index) is not int:
+            continue
+        key = (source_id, image_index)
+        if key not in image_refs or key in image_keys:
             errors.append(f"image_observations[{index}]: 必须唯一引用实际提交的原图片")
-        else:
-            observations[key] = observation.text
+        elif isinstance(observation.get("text"), str):
+            observations[key] = observation["text"]
+        image_keys.add(key)
 
     def cited(row, path):
-        if row.source_id not in sources:
+        source_id, quote = row.get("source_id"), row.get("quote")
+        if not isinstance(source_id, str):
+            return
+        if source_id not in sources:
             raise ValueError(f"{path}.source_id: 引用来源不属于当前输入")
-        if row.citation_kind == "image":
-            key = (row.source_id, row.image_index)
-            if key not in observations or row.quote not in observations[key]:
+        if not isinstance(quote, str):
+            return
+        citation_kind = row.get("citation_kind", "text")
+        if citation_kind == "image":
+            image_index = row.get("image_index")
+            if type(image_index) is not int:
+                return
+            key = (source_id, image_index)
+            if key not in observations or quote not in observations[key]:
                 raise ValueError(
                     f"{path}.quote: 图片引用必须由同张已提交图片的观察支持"
                 )
-        elif not _supports(row.quote, sources[row.source_id]):
+        elif citation_kind == "text" and not _supports(quote, sources[source_id]):
             raise ValueError(f"{path}.quote: 必须逐字属于相应来源的标题或正文")
 
-    original_mentions = {item.id: item for item in result.mentions}
+    original_mentions = {
+        row["id"]: row
+        for row in rows("mentions")
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    }
     ids = set()
-    # The single repair must see all citation failures before IDs or evidence change.
-    for field, rows in (
-        ("mentions", result.mentions),
-        ("activities", result.activities),
-        ("evidence", result.evidence),
-    ):
-        for index, row in enumerate(rows):
+    # Check usable raw fields so schema failures cannot hide citations from the repair.
+    for field in ("mentions", "activities", "evidence"):
+        for index, row in enumerate(rows(field)):
+            if not isinstance(row, dict):
+                continue
             path = f"{field}[{index}]"
             try:
                 cited(row, path)
             except ValueError as error:
                 errors.append(str(error))
             if field == "mentions":
-                if row.id in ids:
-                    errors.append(f"{path}.id: 地点提及ID重复")
-                ids.add(row.id)
-                if row.name not in row.quote:
+                identity = row.get("id")
+                if isinstance(identity, str):
+                    if identity in ids:
+                        errors.append(f"{path}.id: 地点提及ID重复")
+                    ids.add(identity)
+                name, quote = row.get("name"), row.get("quote")
+                if isinstance(name, str) and isinstance(quote, str) and name not in quote:
                     errors.append(
-                        f"{path}.name: 地点原名{json.dumps(row.name, ensure_ascii=False)}必须由quote字面支持"
+                        f"{path}.name: 地点原名{json.dumps(name, ensure_ascii=False)}必须由quote字面支持"
                     )
-            elif row.mention_id is not None:
-                mention = original_mentions.get(row.mention_id)
+            elif isinstance(row.get("mention_id"), str):
+                mention = original_mentions.get(row["mention_id"])
                 if mention is None:
                     errors.append(f"{path}.mention_id: 关联必须属于本次提及")
-                elif field == "activities" and mention.name not in row.quote:
+                elif (
+                    field == "activities"
+                    and isinstance(mention.get("name"), str)
+                    and isinstance(row.get("quote"), str)
+                    and mention["name"] not in row["quote"]
+                ):
                     errors.append(
-                        f"{path}.quote: 必须包含所属提及原名{json.dumps(mention.name, ensure_ascii=False)}"
+                        f"{path}.quote: 必须包含所属提及原名{json.dumps(mention['name'], ensure_ascii=False)}"
                     )
-    if not comment_ids <= {item.source_id for item in result.evidence}:
+    covered_comments = {
+        row["source_id"]
+        for row in rows("evidence")
+        if isinstance(row, dict) and isinstance(row.get("source_id"), str)
+    }
+    if not comment_ids <= covered_comments:
         errors.append("evidence: 每条提交评论须显式分类，不能漏掉unknown")
+    try:
+        result = NoteExtraction.model_validate(raw, strict=True)
+    except ValidationError as error:
+        errors.extend(
+            f"{'.'.join(map(str, item['loc']))}: {item['type']} ({item['msg']})"
+            for item in error.errors(include_input=False)
+        )
     if errors:
         raise ValueError("; ".join(errors))
 

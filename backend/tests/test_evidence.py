@@ -203,6 +203,80 @@ def test_single_repair_sees_name_activity_and_evidence_failures_together():
     )
 
 
+def test_single_repair_combines_schema_errors_and_safe_raw_reference_checks():
+    bad = extraction()
+    bad["mentions"][0]["name"] = "无依据地点"
+    bad["activities"][0].pop("description")
+    bad["activities"][0]["quote"] = "河坊街可以吃饭"
+    bad["activities"].append(
+        {
+            **bad["activities"][0],
+            "description": 123,
+            "source_id": "foreign-source",
+            "mention_id": "foreign-mention",
+        }
+    )
+    bad["evidence"][0]["source_id"] = "foreign-comment"
+    result, calls = run([bad, extraction()])
+    assert result["status"] == "passed" and len(calls) == 2
+    assert result["usage"]["total_tokens"] == 200
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert all(
+        path in repair
+        for path in (
+            "activities.0.description: missing",
+            "activities.1.description: string_type",
+            "mentions[0].name",
+            "activities[0].quote",
+            "activities[1].source_id",
+            "activities[1].mention_id",
+            "evidence[0].source_id",
+            "每条提交评论须显式分类",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("mentions", None),
+        ("activities", {}),
+        ("evidence", 123),
+        ("image_observations", None),
+        ("mentions", ["private-schema-input"]),
+        (
+            "activities",
+            [{"source_id": [], "mention_id": {}, "quote": None, "description": False}],
+        ),
+        ("evidence", [{"source_id": {}, "quote": [], "mention_id": []}]),
+        ("image_observations", [{"source_id": [], "image_index": {}, "text": None}]),
+    ],
+)
+def test_malformed_raw_fields_still_require_strict_schema_without_crashing(field, value):
+    bad = extraction()
+    bad[field] = value
+    result, calls = run([bad, bad])
+    assert result["status"] == "failed" and result["data"] is None
+    assert len(calls) == 2 and result["usage"]["total_tokens"] == 200
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert field in repair
+    assert "choices" not in repair and "private-schema-input" not in repair
+
+
+def test_invalid_image_observation_and_missing_activity_field_are_both_rejected():
+    bad = extraction()
+    bad["activities"][0].pop("description")
+    bad["image_observations"] = [
+        {"source_id": "note-a", "image_index": 1, "text": "西湖适合散步"}
+    ]
+    result, calls = run([bad, bad])
+    assert result["status"] == "failed" and result["data"] is None
+    assert len(calls) == 2
+    repair = json.loads(calls[1].content)["messages"][-1]["content"]
+    assert "image_observations[0]" in repair
+    assert "activities.0.description: missing" in repair
+
+
 def test_original_emoji_name_and_multiline_quote_cannot_be_normalized_or_joined():
     sample, valid = note(), extraction()
     sample["text"] = "青山⛰️步道\n沿路有树林\n适合散步"
