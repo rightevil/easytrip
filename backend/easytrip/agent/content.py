@@ -9,10 +9,17 @@ from ..integrations.xhs import ToolFailure
 from ..services.collection import CollectionService
 from ..services.evidence import NoteExtraction, assemble_candidates, extract_note
 
+# Bump when extraction prompts or semantic validation change.
+EXTRACTION_CONTRACT = "p2-evidence-object-dimension-v2"
+
 
 def note_hash(note):
     return hashlib.sha256(
-        json.dumps(note, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        json.dumps(
+            {"contract": EXTRACTION_CONTRACT, "note": note},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -101,6 +108,7 @@ async def analyse(runner, run, snapshot, client):
         if result is None and record.get("reused_from_run"):
             result = await inherited_extraction(runner, run, note)
         if result is None:
+            digest = note_hash(note)
             cached, before, after = await runner.model_hooks(run, key)
             if cached is not None:
                 actions = await runner.db("list_actions", run["id"])
@@ -124,7 +132,9 @@ async def analyse(runner, run, snapshot, client):
                             for item in note["comments"]
                         ),
                     },
-                    "model_id": runner.settings.model_id,
+                    "model_id": successful["params"].get("model_id"),
+                    # A recovered legacy response must not become a current-contract cache.
+                    "note_hash": successful["params"].get("input_hash"),
                 }
             else:
                 current = await runner.db("get_run", run["id"])
@@ -142,6 +152,14 @@ async def analyse(runner, run, snapshot, client):
                         reply_used += previous_result.get("coverage", {}).get(
                             "replies_submitted", 0
                         )
+
+                physical_model_id = runner.settings.model_id
+
+                async def versioned_before(info):
+                    return await before(
+                        {**info, "input_hash": digest, "model_id": physical_model_id}
+                    )
+
                 output = await extract_note(
                     client,
                     runner.settings,
@@ -151,7 +169,7 @@ async def analyse(runner, run, snapshot, client):
                     reply_limit=max(0, run["budget"]["reply_limit"] - reply_used)
                     if run["budget"]["include_replies"]
                     else 0,
-                    before_request=before,
+                    before_request=versioned_before,
                     after_request=after,
                 )
                 if output["status"] != "passed":
@@ -177,7 +195,7 @@ async def analyse(runner, run, snapshot, client):
                     for key, value in output.items()
                     if key not in {"requests", "usage"}
                 }
-            result["note_hash"] = note_hash(note)
+                result["note_hash"] = digest
         if result.get("status") != "passed":
             continue
         if not await runner.db(

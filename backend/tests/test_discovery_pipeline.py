@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+from dataclasses import replace
 from uuid import uuid4
 
 import httpx
@@ -272,8 +274,14 @@ def test_main_metric_is_consistent_for_new_and_inherited_sources_without_votes(
         def fee_comments(name, arguments):
             if name == "get_feed_detail":
                 return payload(
-                    [comment("fee", "西湖门票15元"), comment("fee-question", "西湖门票免费吗？")],
-                    noteId="play", title="杭州西湖", desc="杭州西湖旅行记录", imageList=[],
+                    [
+                        comment("fee", "西湖门票15元"),
+                        comment("fee-question", "西湖门票免费吗？"),
+                    ],
+                    noteId="play",
+                    title="杭州西湖",
+                    desc="杭州西湖旅行记录",
+                    imageList=[],
                 )
             return responder(name, arguments)
 
@@ -291,7 +299,12 @@ def test_main_metric_is_consistent_for_new_and_inherited_sources_without_votes(
         monkeypatch.setattr(content, "extract_note", classify_fee_evidence)
         database.enqueue_run(
             trip["id"],
-            CreateRun(operation_id=uuid4(), expected_version=1, kind="discover", budget={"target_notes": 1}),
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
         )
         parent = database.claim_run()
         await runner.execute(parent)
@@ -301,12 +314,22 @@ def test_main_metric_is_consistent_for_new_and_inherited_sources_without_votes(
         assert parent_final["usage"]["judgement_rows"] == 2
         database.enqueue_run(
             trip["id"],
-            CreateRun(operation_id=uuid4(), expected_version=1, kind="discover", parent_run_id=parent["id"], budget={"target_notes": 1}),
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=parent["id"],
+                budget={"target_notes": 1},
+            ),
         )
         child = database.claim_run()
         await runner.execute(child)
         final = database.get_run(child["id"])
-        assert final["usage"]["comments_analyzed"] == final["usage"]["comments_judged"] == 0
+        assert (
+            final["usage"]["comments_analyzed"]
+            == final["usage"]["comments_judged"]
+            == 0
+        )
         assert final["result"]["coverage"]["comments_reused_analyzed"] == 2
         assert final["result"]["coverage"]["comments_reused_judged"] == judged
         assert database.get_run(parent["id"])["usage"]["comments_judged"] == judged
@@ -662,6 +685,21 @@ def test_known_invalid_extraction_is_reported_without_automatic_recharge(
         assert (
             len(calls) == 3
         )  # One intent request, one extraction, one bounded text repair.
+        note = database.get_run_item(run["id"], "note:play")["note"]
+        extraction_actions = [
+            row
+            for row in database.list_actions(run["id"])
+            if row["action_key"].startswith("extract:")
+        ]
+        assert len(extraction_actions) == 2
+        assert all(
+            row["params"]["input_hash"] == content.note_hash(note)
+            for row in extraction_actions
+        )
+        assert all(
+            row["params"]["model_id"] == runner.settings.model_id
+            for row in extraction_actions
+        )
         assert database.list_candidates(trip["id"], run["id"])["total"] == 0
 
     asyncio.run(check())
@@ -747,5 +785,328 @@ def test_three_rounds_reuse_nearest_successful_analysis_of_inherited_sources(
         )
         assert final["result"]["coverage"]["notes_reused"] == 1
         assert database.list_candidates(trip["id"], third["id"])["total"] > 0
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("old_contract", ["legacy", "older_version"])
+def test_new_contract_reanalyses_old_parent_then_reuses_nearest_compatible_result(
+    tmp_path, monkeypatch, old_contract
+):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, with_images=True
+        )
+        contract = content.EXTRACTION_CONTRACT
+        original_extract = content.extract_note
+        original_save = database.save_run_item
+        if old_contract == "older_version":
+            monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "old-prompt")
+
+        async def old_objects_missing(*args, **kwargs):
+            result = await original_extract(*args, **kwargs)
+            for row in result["data"]["evidence"]:
+                row["object_text"] = ""
+                row["link_status"] = "uncertain"
+            return result
+
+        def legacy_save(run_id, generation, key, value):
+            if (
+                old_contract == "legacy"
+                and key.startswith("extract:")
+                and value.get("status") == "passed"
+            ):
+                note = database.get_run_item(run_id, "note:play")["note"]
+                digest = hashlib.sha256(
+                    json.dumps(note, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                value = {**value, "note_hash": digest}
+            return original_save(run_id, generation, key, value)
+
+        monkeypatch.setattr(content, "extract_note", old_objects_missing)
+        monkeypatch.setattr(database, "save_run_item", legacy_save)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
+        )
+        parent = database.claim_run()
+        await runner.execute(parent)
+        note = database.get_run_item(parent["id"], "note:play")["note"]
+        key = "extract:" + note["source_id"]
+        old_result = database.get_run_item(parent["id"], key)
+        assert old_result["status"] == "passed"
+        assert all(not row["object_text"] for row in old_result["data"]["evidence"])
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", contract)
+        monkeypatch.setattr(content, "extract_note", original_extract)
+        monkeypatch.setattr(database, "save_run_item", original_save)
+        assert old_result["note_hash"] != content.note_hash(note)
+        before = len(calls), len(mcp.calls)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=parent["id"],
+                budget={"target_notes": 1},
+            ),
+        )
+        child = database.claim_run()
+        await runner.execute(child)
+        revised = database.get_run_item(child["id"], key)
+        assert revised["note_hash"] == content.note_hash(note)
+        assert all(row["object_text"] == "西湖" for row in revised["data"]["evidence"])
+        assert len(calls) == before[0] + 2
+        assert database.get_run(child["id"])["usage"]["images"] == 2
+        assert database.get_run_item(parent["id"], key) == old_result
+        assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
+        before = len(calls), len(mcp.calls)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=child["id"],
+                budget={"target_notes": 1},
+            ),
+        )
+        grandchild = database.claim_run()
+        await runner.execute(grandchild)
+        reused = database.get_run_item(grandchild["id"], key)
+        assert reused["reused_from_run"] == child["id"]
+        assert reused["note_hash"] == revised["note_hash"]
+        assert len(calls) == before[0] + 1
+        assert database.get_run(grandchild["id"])["usage"]["images"] == 0
+        assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "recorded_contract",
+    ["legacy", "legacy_model", "older_version", "current", "model_changed"],
+)
+def test_successful_action_recovery_preserves_its_physical_input_hash(
+    tmp_path, monkeypatch, recorded_contract
+):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, with_images=True
+        )
+        contract = content.EXTRACTION_CONTRACT
+        if recorded_contract == "older_version":
+            monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "old-prompt")
+        if recorded_contract == "model_changed":
+            runner.settings = replace(runner.settings, model_id="model-a")
+        original_begin = database.begin_action
+        original_save = database.save_run_item
+
+        def record_legacy(run_id, generation, key, kind, params):
+            if recorded_contract in {"legacy", "legacy_model"} and key.startswith(
+                "extract:"
+            ):
+                missing = {"model_id"}
+                if recorded_contract == "legacy":
+                    missing.add("input_hash")
+                params = {
+                    name: value for name, value in params.items() if name not in missing
+                }
+            return original_begin(run_id, generation, key, kind, params)
+
+        def interrupt_checkpoint(run_id, generation, key, value):
+            if key.startswith("extract:") and value.get("status") == "passed":
+                raise asyncio.CancelledError()
+            return original_save(run_id, generation, key, value)
+
+        monkeypatch.setattr(database, "begin_action", record_legacy)
+        monkeypatch.setattr(database, "save_run_item", interrupt_checkpoint)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
+        )
+        parent = database.claim_run()
+        with pytest.raises(asyncio.CancelledError):
+            await runner.execute(parent)
+        note = database.get_run_item(parent["id"], "note:play")["note"]
+        key = "extract:" + note["source_id"]
+        action = next(
+            row
+            for row in database.list_actions(parent["id"])
+            if row["action_key"].startswith(key + ":model:")
+        )
+        assert action["status"] == "completed"
+        recorded_hash = action["params"].get("input_hash")
+        assert (recorded_hash is None) is (recorded_contract == "legacy")
+        recorded_model = action["params"].get("model_id")
+        assert (recorded_model is None) is (
+            recorded_contract in {"legacy", "legacy_model"}
+        )
+        if recorded_contract == "model_changed":
+            assert recorded_model == "model-a"
+            assert all(request["model"] == "model-a" for request in calls)
+            runner.settings = replace(runner.settings, model_id="model-b")
+        assert database.get_run_item(parent["id"], key) is None
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", contract)
+        monkeypatch.setattr(database, "begin_action", original_begin)
+        monkeypatch.setattr(database, "save_run_item", original_save)
+        before = len(calls), len(mcp.calls)
+        usage = database.get_run(parent["id"])["usage"]
+        database.recover_runs(graceful=True)
+        await runner.execute(resume(database, parent))
+        restored = database.get_run_item(parent["id"], key)
+        assert restored["note_hash"] == recorded_hash
+        assert restored["model_id"] == recorded_model
+        if recorded_contract == "model_changed":
+            assert all(
+                row["model_id"] == "model-a" for row in restored["data"]["evidence"]
+            )
+        assert restored["submitted_images"] == [
+            {"source_id": note["source_id"], "image_index": 1},
+            {"source_id": note["source_id"], "image_index": 2},
+        ]
+        assert (len(calls), len(mcp.calls)) == before
+        final = database.get_run(parent["id"])
+        assert final["status"] == "completed"
+        assert final["usage"]["model_calls"] == usage["model_calls"] == 2
+        assert final["usage"]["model_tokens"] == usage["model_tokens"] == 60
+        assert final["usage"]["images"] == usage["images"] == 2
+        if recorded_contract in {"legacy", "older_version"}:
+            assert restored["note_hash"] != content.note_hash(note)
+        else:
+            assert restored["note_hash"] == content.note_hash(note)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=parent["id"],
+                budget={"target_notes": 1},
+            ),
+        )
+        child = database.claim_run()
+        await runner.execute(child)
+        child_result = database.get_run_item(child["id"], key)
+        assert child_result["note_hash"] == content.note_hash(note)
+        assert child_result["model_id"] == runner.settings.model_id
+        assert all(
+            row["model_id"] == runner.settings.model_id
+            for row in child_result["data"]["evidence"]
+        )
+        if recorded_contract == "model_changed":
+            assert all(request["model"] == "model-b" for request in calls[before[0] :])
+        assert len(calls) == before[0] + (1 if recorded_contract == "current" else 2)
+        assert database.get_run(child["id"])["usage"]["images"] == (
+            0 if recorded_contract == "current" else 2
+        )
+        assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
+
+    asyncio.run(check())
+
+
+def test_contract_update_does_not_replay_unknown_action_in_same_run(
+    tmp_path, monkeypatch
+):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, scheduled=True, fail_second=True, with_images=True
+        )
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "old-prompt")
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 4},
+            ),
+        )
+        run = database.claim_run()
+        await runner.execute(run)
+        final = database.get_run(run["id"])
+        assert (
+            final["status"] == "paused"
+            and final["stop_reason"] == "model_result_unknown"
+        )
+        unknown = [
+            row
+            for row in database.list_actions(run["id"])
+            if row["status"] == "unknown"
+        ]
+        assert len(unknown) == 1
+        before = len(calls), len(mcp.calls)
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "new-prompt")
+        await runner.execute(resume(database, run))
+        resumed = database.get_run(run["id"])
+        assert (
+            resumed["status"] == "paused"
+            and resumed["stop_reason"] == "model_retry_requires_new_run"
+        )
+        assert (len(calls), len(mcp.calls)) == before
+        assert database.list_actions(run["id"])[-1]["id"] == unknown[0]["id"]
+        for key in (
+            "model_calls",
+            "model_tokens",
+            "images",
+            "reserved_tokens",
+            "unknown_result_calls",
+        ):
+            assert resumed["usage"][key] == final["usage"][key]
+
+    asyncio.run(check())
+
+
+def test_new_contract_cache_miss_still_obeys_child_call_budget(tmp_path, monkeypatch):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, with_images=True
+        )
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "old-prompt")
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
+        )
+        parent = database.claim_run()
+        await runner.execute(parent)
+        monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "new-prompt")
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=parent["id"],
+                budget={"target_notes": 1, "max_model_calls": 1},
+            ),
+        )
+        child = database.claim_run()
+        await runner.execute(child)
+        final = database.get_run(child["id"])
+        assert final["status"] == "partial"
+        assert final["stop_reason"] == "model_budget_exhausted"
+        assert final["usage"]["model_calls"] == 1 and final["usage"]["images"] == 0
+        assert (
+            final["usage"]["model_tokens"] == 30
+            and final["usage"]["reserved_tokens"] == 0
+        )
+        assert len(calls) == 3
+        assert final["result"]["coverage"]["notes_reused_analyzed"] == 0
+        assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
 
     asyncio.run(check())
