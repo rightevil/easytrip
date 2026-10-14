@@ -294,6 +294,23 @@ describe('source-grounded discovery', () => {
     expect(screen.queryByRole('button', { name: '恢复发现任务' })).toBeNull();
   });
 
+  it.each([undefined, 0, 2])('shows rejected activity counts only when recorded (%s) and preserves semantic uncertainty', rejected => {
+    const partial = run('one', {
+      status: 'partial', stage: 'done',
+      result: {
+        coverage: { activities_rejected: rejected },
+        partial_reasons: ['activities_partly_unanalysed'],
+        model: { model_id: 'Agnes', schema_version: 'p2-v1', semantic_quality: 'not_validated' },
+      },
+    });
+    render(<Discovery session={session(trip('one', [partial]))} requestVersion={1} category="all" archived={false} />);
+    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    expect(coverage.getByText(/部分活动引用未通过校验，已保留有效评论；相关活动未纳入候选。/)).toBeTruthy();
+    if (rejected === undefined) expect(coverage.queryByText('引用校验未通过活动')).toBeNull();
+    else expect(coverage.getByText('引用校验未通过活动').closest('div')?.querySelector('strong')?.textContent).toBe(String(rejected));
+    expect(coverage.getByText('模型语义质量未验证，候选与评价请结合原文核对。')).toBeTruthy();
+  });
+
   it('shows first analysis of reused sources separately from zero new collection and actual charged usage', () => {
     const analyzed = run('one', {
       status: 'partial', stage: 'done',

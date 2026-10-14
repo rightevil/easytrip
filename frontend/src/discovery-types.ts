@@ -106,6 +106,7 @@ export interface DiscoveryCoverage {
   comments_reused_analyzed?: number;
   comments_reused_judged?: number;
   judgement_rows?: number;
+  activities_rejected?: number;
   evidence_count?: number;
   images_obtained?: number;
   images_analyzed_unique?: number;

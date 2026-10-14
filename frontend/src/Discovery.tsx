@@ -39,6 +39,7 @@ const pauseReasons: Record<string, string> = {
   model_result_unknown: '模型调用结果未知，可能已执行，费用尚未确认。已取得来源和未知用量仍保留；本轮不能恢复，请确认新增预算后继续一轮。',
   note_target_not_reached: '本轮新增取得的笔记未达到目标数量。',
   comments_partly_unanalysed: '本轮选取的部分评论尚未完成分析。',
+  activities_partly_unanalysed: '部分活动引用未通过校验，已保留有效评论；相关活动未纳入候选。',
   no_source_backed_candidates: '当前来源尚未形成有依据的地点候选。',
   insufficient_exploration_directions: '有来源的探索方向不足两个，暂无法充分比较。',
 };
@@ -170,6 +171,7 @@ function Coverage({ run }: { run: Run }) {
     <div><span>取得 / 已分析评论</span><strong>{count(coverage.comments_obtained)} / {count(coverage.comments_analyzed)}</strong></div>
     <div><span>已判 / 未判评论</span><strong>{count(coverage.comments_judged)} / {count(unjudged)}</strong></div>
     <div><span>模型判断条目</span><strong>{count(coverage.judgement_rows)}</strong></div>
+    {typeof coverage.activities_rejected === 'number' && <div><span>引用校验未通过活动</span><strong>{count(coverage.activities_rejected)}</strong></div>}
     <div><span>取得图片 / 提交次数</span><strong>{count(coverage.images_obtained)} / {count(run.usage.images)}</strong></div>
     <div><span>已分析 / 未分析图片（去重）</span><strong>{count(coverage.images_analyzed_unique)} / {count(coverage.images_unanalyzed)}</strong></div>
     <div><span>沿用笔记：已分析 / 总数</span><strong>{count(coverage.notes_reused_analyzed)} / {count(coverage.notes_reused)}</strong></div>

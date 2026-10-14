@@ -24,6 +24,7 @@ def setup(
     scheduled=False,
     fail_second=False,
     invalid_extraction=False,
+    invalid_activity=False,
     with_images=False,
     generic=False,
 ):
@@ -127,6 +128,21 @@ def setup(
             }
             if invalid_extraction:
                 data["mentions"][0]["quote"] = "不在任何原文中的伪造引用"
+            if invalid_activity:
+                activity = {
+                    "source_id": inputs["source_id"],
+                    "mention_id": "m1",
+                    "quote": {
+                        "part": "text",
+                        "start_line": 1,
+                        "end_line": len(inputs["text"]),
+                    },
+                    "description": "旅行记录",
+                }
+                data["activities"] = [
+                    activity,
+                    {**activity, "description": "门票15元"},
+                ]
             if with_images and any(row.get("type") == "image_url" for row in user):
                 data["image_observations"] = [
                     {
@@ -742,6 +758,179 @@ def test_known_invalid_extraction_is_reported_without_automatic_recharge(
             for row in extraction_actions
         )
         assert database.list_candidates(trip["id"], run["id"])["total"] == 0
+
+    asyncio.run(check())
+
+
+def test_bad_activity_keeps_valid_comments_and_reports_partial_without_repair(
+    tmp_path, monkeypatch
+):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, invalid_activity=True
+        )
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
+        )
+        run = database.claim_run()
+        await runner.execute(run)
+        final = database.get_run(run["id"])
+        note = database.get_run_item(run["id"], "note:play")["note"]
+        key = "extract:" + note["source_id"]
+        extracted = database.get_run_item(run["id"], key)
+        report = extracted["data"]["activity_validation"]
+        assert report["received"] == 2 and report["accepted"] == report["rejected"] == 1
+        assert "activities[1].description" in "; ".join(report["errors"])
+        assert final["status"] == "partial" and final["stage"] == "done"
+        assert final["result"]["coverage"]["activities_rejected"] == 1
+        assert final["result"]["partial_reasons"] == ["activities_partly_unanalysed"]
+        assert "1条活动未通过校验" in final["result"]["summary"]
+        assert (
+            final["usage"]["comments_analyzed"]
+            == final["usage"]["comments_judged"]
+            == 2
+        )
+        assert final["usage"]["notes_analyzed"] == 1
+        assert len(calls) == final["usage"]["model_calls"] == 2
+        candidate = database.list_candidates(trip["id"], run["id"])["items"][0]
+        assert {
+            row["quote"]
+            for row in database.candidate_evidence(trip["id"], candidate["id"])
+        } == {row["text"] for row in note["comments"]}
+        with database.connection() as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM activities WHERE run_id=?", (run["id"],)
+                ).fetchone()[0]
+                == 1
+            )
+        before = len(calls), sum(name == "get_feed_detail" for name, _ in mcp.calls)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                parent_run_id=run["id"],
+                budget={"target_notes": 1},
+            ),
+        )
+        child = database.claim_run()
+        await runner.execute(child)
+        inherited = database.get_run_item(child["id"], key)
+        assert inherited["reused_from_run"] == run["id"]
+        assert inherited["data"]["activity_validation"] == report
+        assert len(calls) == before[0] + 1
+        assert sum(name == "get_feed_detail" for name, _ in mcp.calls) == before[1]
+        reused = database.get_run(child["id"])
+        assert reused["result"]["coverage"]["activities_rejected"] == 1
+        assert "activities_partly_unanalysed" in reused["result"]["partial_reasons"]
+        assert reused["result"]["coverage"]["comments_reused_judged"] == 2
+
+    asyncio.run(check())
+
+
+def test_invalid_note_does_not_hide_later_activity_rejections(tmp_path, monkeypatch):
+    async def check():
+        database, trip, runner, _, calls = setup(
+            tmp_path, monkeypatch, scheduled=True, invalid_activity=True
+        )
+        original_extract = content.extract_note
+
+        async def fail_first_note(client, settings, note, **kwargs):
+            if note["title"] == "杭州西湖":
+                return {
+                    "status": "failed",
+                    "error": "invalid schema",
+                    "requests": [],
+                    "coverage": {},
+                }
+            return await original_extract(client, settings, note, **kwargs)
+
+        monkeypatch.setattr(content, "extract_note", fail_first_note)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 4},
+            ),
+        )
+        run = database.claim_run()
+        await runner.execute(run)
+        final = database.get_run(run["id"])
+        assert final["result"]["coverage"]["activities_rejected"] == 2
+        assert {"model_output_invalid", "activities_partly_unanalysed"} <= set(
+            final["result"]["partial_reasons"]
+        )
+        assert final["usage"]["comments_analyzed"] == 4
+        assert len(calls) == 3
+
+    asyncio.run(check())
+
+
+def test_activity_diagnostic_survives_ledger_recovery_without_recharge(
+    tmp_path, monkeypatch
+):
+    async def check():
+        database, trip, runner, mcp, calls = setup(
+            tmp_path, monkeypatch, invalid_activity=True
+        )
+        original_save = database.save_run_item
+
+        def interrupt_checkpoint(run_id, generation, key, value):
+            if key.startswith("extract:") and value.get("status") == "passed":
+                raise asyncio.CancelledError()
+            return original_save(run_id, generation, key, value)
+
+        monkeypatch.setattr(database, "save_run_item", interrupt_checkpoint)
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=1,
+                kind="discover",
+                budget={"target_notes": 1},
+            ),
+        )
+        run = database.claim_run()
+        with pytest.raises(asyncio.CancelledError):
+            await runner.execute(run)
+        note = database.get_run_item(run["id"], "note:play")["note"]
+        key = "extract:" + note["source_id"]
+        assert database.get_run_item(run["id"], key) is None
+        action = next(
+            row
+            for row in database.list_actions(run["id"])
+            if row["action_key"].startswith(key + ":model:")
+        )
+        assert action["status"] == "completed"
+        report = action["result"]["model_data"]["activity_validation"]
+        assert report["rejected"] == 1
+        before = len(calls), len(mcp.calls)
+        monkeypatch.setattr(database, "save_run_item", original_save)
+        database.recover_runs(graceful=True)
+        await runner.execute(resume(database, run))
+        restored = database.get_run_item(run["id"], key)
+        assert restored["data"]["activity_validation"] == report
+        assert (len(calls), len(mcp.calls)) == before
+        final = database.get_run(run["id"])
+        assert final["status"] == "partial"
+        assert final["result"]["coverage"]["activities_rejected"] == 1
+        assert "activities_partly_unanalysed" in final["result"]["partial_reasons"]
+        assert (
+            final["usage"]["comments_analyzed"]
+            == final["usage"]["comments_judged"]
+            == 2
+        )
+        assert final["usage"]["model_calls"] == 2
 
     asyncio.run(check())
 

@@ -428,10 +428,6 @@ def test_single_repair_combines_schema_errors_and_safe_raw_reference_checks():
         ("evidence", 123),
         ("image_observations", None),
         ("mentions", ["private-schema-input"]),
-        (
-            "activities",
-            [{"source_id": [], "mention_id": {}, "quote": None, "description": False}],
-        ),
         ("evidence", [{"source_id": {}, "quote": [], "mention_id": []}]),
         ("image_observations", [{"source_id": [], "image_index": {}, "text": None}]),
     ],
@@ -480,16 +476,54 @@ def test_original_emoji_name_and_multiline_quote_cannot_be_normalized_or_joined(
     assert result["data"]["activities"][0]["quote"] == sample["text"]
 
 
-def test_unknown_source_and_activity_link_report_without_key_error():
+def test_unknown_source_and_activity_link_are_excluded_without_losing_comments():
     bad = extraction()
     bad["activities"][0].update(
         source_id="foreign-source", mention_id="foreign-mention"
     )
-    result, calls = run([bad, bad])
-    assert result["status"] == "failed" and len(calls) == 2
-    repair = json.loads(calls[1].content)["messages"][-1]["content"]
-    assert "activities[0].source_id" in repair and "activities[0].mention_id" in repair
-    assert "choices" not in repair
+    result, calls = run([bad])
+    assert result["status"] == "passed" and len(calls) == 1
+    assert result["data"]["activities"] == []
+    assert result["coverage"]["comments_analysed"] == 1
+    report = result["data"]["activity_validation"]
+    assert (report["received"], report["accepted"], report["rejected"]) == (1, 0, 1)
+    assert "activities[0].source_id" in report["errors"][0]
+    assert "activities[0].mention_id" in report["errors"][0]
+    assert "choices" not in report["errors"][0]
+
+
+def test_valid_activity_and_comments_survive_a_malformed_activity_and_enter_ledger():
+    data, ledger = extraction(), []
+    data["activities"].append(
+        {"source_id": [], "mention_id": {}, "quote": None, "description": False}
+    )
+
+    async def after(_action_id, metadata):
+        ledger.append(metadata)
+
+    result, calls = run([data], after=after)
+    assert len(calls) == 1 and result["status"] == "passed"
+    assert len(result["data"]["activities"]) == 1
+    assert result["coverage"]["comments_analysed"] == 1
+    report = result["data"]["activity_validation"]
+    assert (report["received"], report["accepted"], report["rejected"]) == (2, 1, 1)
+    assert "activities.1." in report["errors"][0]
+    assert ledger[0]["model_data"]["activity_validation"] == report
+    assert ledger[0]["status"] == "passed"
+
+
+@pytest.mark.parametrize("change", ["missing", "too_many", "forged_diagnostic"])
+def test_activity_envelope_and_local_diagnostics_cannot_be_forged(change):
+    data = extraction()
+    if change == "missing":
+        data.pop("activities")
+    elif change == "too_many":
+        data["activities"] *= 121
+    else:
+        data["activity_validation"] = {"received": 0, "accepted": 0, "rejected": 0}
+    result, calls = run([data, data])
+    assert result["status"] == "failed" and result["data"] is None
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -945,7 +979,7 @@ def test_replies_keep_parent_context_after_twenty_first_level_comments():
             "object_text": "西湖",
             "dimension": "预约",
             "nature": "question" if index < 20 else "experience",
-            "stance": "question" if index < 20 else "positive",
+            "stance": "question" if index < 20 else "unknown",
             "quote": item["text"],
             "link_status": "linked",
         }
@@ -964,8 +998,47 @@ def test_replies_keep_parent_context_after_twenty_first_level_comments():
         row for row in result["data"]["evidence"] if row["source_id"] == "reply-a"
     )
     assert reply["quote"] == "我上周去了，不需要"
-    assert reply["link_status"] == "uncertain"
+    assert reply["link_status"] == "linked"
     assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
+
+
+@pytest.mark.parametrize("case", ["ambiguous_parent", "other_place", "unnamed_object"])
+def test_reply_link_requires_unique_parent_and_explicit_object(case):
+    sample, data = note(), extraction()
+    data["mentions"].append(
+        {
+            "id": "hefang",
+            "source_id": "note-a",
+            "name": "河坊街",
+            "category": "eat",
+            "quote": "河坊街可以吃饭",
+        }
+    )
+    parent = (
+        "西湖和河坊街需要预约吗？" if case == "ambiguous_parent" else "西湖需要预约吗？"
+    )
+    reply = "河坊街不需要" if case == "other_place" else "我上周去了，不需要"
+    sample["comments"] = [
+        {"source_id": "comment-a", "text": parent},
+        {"source_id": "reply-a", "reply_to_source_id": "comment-a", "text": reply},
+    ]
+    data["evidence"] = [
+        {
+            "source_id": item["source_id"],
+            "mention_id": "westlake",
+            "object_text": "这里" if case == "unnamed_object" and index else "西湖",
+            "dimension": "预约",
+            "nature": "question" if index == 0 else "experience",
+            "stance": "question" if index == 0 else "unknown",
+            "quote": item["text"],
+            "link_status": "linked",
+        }
+        for index, item in enumerate(sample["comments"])
+    ]
+    result, calls = run([data], sample=sample)
+    assert len(calls) == 1 and result["status"] == "passed"
+    assert result["data"]["evidence"][1]["link_status"] == "uncertain"
+    assert result["data"]["evidence"][1]["quote"] == reply
 
 
 def test_reply_cannot_borrow_parent_quote_or_reference_a_foreign_parent():
@@ -1240,12 +1313,17 @@ def test_text_activity_description_cannot_borrow_details_outside_its_own_quote(
 ):
     sample = note()
     sample["text"] += "\n西湖票价15元，建议预约。"
-    bad, good = extraction(), extraction()
+    bad = extraction()
     bad["activities"][0].update(quote="杭州西湖", description=description)
-    result, calls = run([bad, good], sample=sample)
-    assert result["status"] == "passed" and len(calls) == 2
-    assert "activities[0].description" in calls[1].content.decode()
-    assert result["data"]["activities"][0]["description"] == "适合散步"
+    result, calls = run([bad], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    assert result["data"]["activities"] == []
+    assert result["coverage"]["comments_analysed"] == 1
+    assert result["data"]["activity_validation"]["rejected"] == 1
+    assert (
+        "activities[0].description"
+        in result["data"]["activity_validation"]["errors"][0]
+    )
 
 
 def test_activity_description_guard_joins_name_and_structural_errors_in_single_repair():

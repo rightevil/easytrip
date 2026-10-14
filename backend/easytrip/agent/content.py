@@ -11,7 +11,7 @@ from ..services.collection import CollectionService
 from ..services.evidence import NoteExtraction, assemble_candidates, extract_note
 
 # Bump when extraction prompts or semantic validation change.
-EXTRACTION_CONTRACT = "p2-evidence-contextual-nature-v7"
+EXTRACTION_CONTRACT = "p2-evidence-contextual-nature-v8"
 
 
 def note_hash(note):
@@ -56,7 +56,13 @@ async def records(runner, run):
 
 
 async def persist_extraction(runner, run, result):
-    data = NoteExtraction.model_validate(result["data"]).model_dump(mode="json")
+    data = NoteExtraction.model_validate(
+        {
+            key: value
+            for key, value in result["data"].items()
+            if key != "activity_validation"
+        }
+    ).model_dump(mode="json")
     return await runner.db(
         "save_discovery_batch",
         run["trip_id"],
@@ -424,13 +430,19 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
         and len(content["directions"]) < 2
     ):
         reasons.append("insufficient_exploration_directions")
+    activities_rejected = 0
     for record in await records(runner, run):
         extraction = await runner.db(
             "get_run_item", run["id"], "extract:" + record["note"]["source_id"]
         )
         if extraction and extraction.get("error_code") == "model_output_invalid":
             reasons.append("model_output_invalid")
-            break
+        if extraction and extraction.get("status") == "passed":
+            activities_rejected += (
+                extraction["data"].get("activity_validation", {}).get("rejected", 0)
+            )
+    if activities_rejected:
+        reasons.append("activities_partly_unanalysed")
     queries = await runner.db("get_run_item", run["id"], "gaps:plan", [])
     actions = await runner.db("list_actions", run["id"])
     if any(
@@ -449,6 +461,11 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
             f"本轮新增取得{usage['notes_obtained']}篇笔记，分析{usage['comments_analyzed']}条评论；"
             f"复用{progress['notes_reused']}篇已有笔记，取得{counts['place']}个待定位地点、"
             f"{counts['generic']}条泛称线索、{counts['direction']}个探索方向。"
+            + (
+                f"其中{activities_rejected}条活动未通过校验，已保留独立校验通过的地点与评论。"
+                if activities_rejected
+                else ""
+            )
         ),
         "understanding": current["checkpoint"].get("understanding"),
         "directions": content["directions"],
@@ -493,6 +510,7 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
                 record["note"].get("video_unanalysed")
                 for record in await records(runner, run)
             ),
+            "activities_rejected": activities_rejected,
         },
         "model": {
             "model_id": runner.settings.model_id,

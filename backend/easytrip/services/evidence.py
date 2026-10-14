@@ -351,7 +351,24 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
             if item.mention_id is not None:
                 mention = mentions[item.mention_id]
                 if mention.name not in item.quote:
-                    item.link_status = "uncertain"
+                    parent_id = sources[item.source_id].get("reply_to_source_id")
+                    parent_text = sources.get(parent_id, {}).get("text", "")
+                    parent_mentions = {
+                        row.id for row in mentions.values() if row.name in parent_text
+                    }
+                    other_named = any(
+                        row.id != mention.id and row.name in item.quote
+                        for row in mentions.values()
+                    )
+                    # Only an explicit object and a unique, submitted parent support a reply link.
+                    if not (
+                        item.link_status == "linked"
+                        and item.object_text == mention.name
+                        and parent_id in comment_ids
+                        and parent_mentions == {mention.id}
+                        and not other_named
+                    ):
+                        item.link_status = "uncertain"
         key = (
             item.source_id,
             item.mention_id,
@@ -373,6 +390,49 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
     if not comment_ids <= {item.source_id for item in evidence}:
         raise ValueError("每条提交评论须显式分类，不能漏掉unknown")
     return result
+
+
+def _validate_sections(content, sources, comment_ids, submitted_images):
+    raw = json.loads(content)
+    activities = raw.get("activities") if isinstance(raw, dict) else None
+    if not isinstance(activities, list) or len(activities) > 120:
+        # A malformed envelope still needs the existing bounded repair.
+        return validate_note_extraction(
+            content, sources, comment_ids, submitted_images
+        ), {}
+    try:
+        core = validate_note_extraction(
+            json.dumps({**raw, "activities": []}),
+            sources,
+            comment_ids,
+            submitted_images,
+        )
+    except ValueError:
+        # Report core and activity failures together during the one permitted repair.
+        return validate_note_extraction(
+            content, sources, comment_ids, submitted_images
+        ), {}
+    accepted, errors = [], []
+    for index, activity in enumerate(activities):
+        try:
+            section = validate_note_extraction(
+                json.dumps({**raw, "activities": [activity], "evidence": []}),
+                sources,
+                set(),
+                submitted_images,
+            )
+            accepted.extend(section.activities)
+        except ValueError as error:
+            message = str(error).replace("activities[0]", f"activities[{index}]")
+            message = message.replace("activities.0.", f"activities.{index}.")
+            errors.append(message[:500])
+    core.activities = accepted
+    return core, {
+        "received": len(activities),
+        "accepted": len(accepted),
+        "rejected": len(errors),
+        "errors": errors,
+    }
 
 
 async def extract_note(
@@ -462,7 +522,11 @@ async def extract_note(
         characters += len(item["text"])
     for item in [*selected_parents, *selected_replies]:
         comment_id = item["source_id"]
-        sources[comment_id] = {"text": item["text"], "title": ""}
+        sources[comment_id] = {
+            "text": item["text"],
+            "title": "",
+            "reply_to_source_id": item.get("reply_to_source_id"),
+        }
         comment_ids.add(comment_id)
         comments.append(item)
     submitted, content = [], []
@@ -506,17 +570,19 @@ async def extract_note(
         "文本activities.description直接复制自身quote中的连续原文短片段，不另写概括句、不附加其它行的票价/时间/预约；引用含名称与描述时可截取有信息的描述片段，不强求description也重复名称。"
         "若名称在上一段、活动在下一段，必须选择包含中间文字的完整连续行范围；不能把名称和活动句拼成新quote。修正name后同步核对关联活动quote。"
         "city不明用null；同名分店/馆区/营地分别保留，村口农家菜等泛称kind=generic；路线category=transport，不能冒充可靠车次。"
-        "每条输入评论至少分类一次，包括unknown；多对象、多维度、多问题拆条。nature区分experience亲历、question提问、hearsay转述、wish期待、suggestion建议、content_reaction内容态度、unknown。"
+        "评论按三个优先级处理：先把独立对象与主要判断拆齐，再写实际评价对象，最后分别判断nature与stance。每条输入评论至少分类一次，包括unknown。"
+        "例如'甲馆至少两小时，你这一天排不完'拆甲馆耗时与整体行程单日可行性；'最终安排发一下？湖区需要两天吗？'拆整体计划参考请求与湖区游览天数，不因具体地点出现而漏掉计划。"
+        "nature区分experience亲历、question提问、hearsay转述、wish期待、suggestion建议、content_reaction内容态度、unknown。"
         "性质按该条quote的具体意思判断：'哪里都很美'是陈述，不因哪里/怎么/是否等单词改为问句；摄影/机位可以是本人到访体验，不自动算夸图片；好像表示不确定，不单凭此词当作听他人转述。亲历与提问/听说/收藏同句时按维度拆条并分别选短原文，不能因上下文中一个问号或关键词改写整条性质。"
         "nature与stance分别判断：'这个不冷门吧？'可nature=question、stance=negative，表示质疑冷门，不是地点亲历差评；'被美景种草了，住宿有推荐吗'须拆为兴趣wish/positive与住宿question/question，不能把兴趣也变为提问。"
-        "reply_to_source_id标明回复的父评论，只用父评论理解语境；回复quote仍逐字引用自身text，不能借用父评论文字冒充回复者亲历。"
-        "每条evidence显式写object_text，填评价对象原名或原文指代；对象确实不明时用空字符串，不省略字段。"
-        "linked表示已明确关联具体提及，object_text不得为空；整体路线/比较的对象明确但不是某个地点时，保留对象并unlinked；"
-        "例如'1号线比7号线时间长'可对象='1号线与7号线'、dimension='时长比较'、mention_id=null、link_status=unlinked；"
-        "'明天开放吗'且船线与景点都可能时才object_text=''、mention_id=null、link_status=uncertain，不把所有评论都弃判。"
+        "reply_to_source_id标明回复的父评论；只有父评论唯一明确一个提及且回复无其它地点时才可依据它关联，object_text写该原名；回复quote仍逐字引用自身text，不能借用父评论文字冒充亲历。"
+        "object_text显式写评论实际评价对象：地点、整体行程/计划、比较关系、评论区攻略、账号主页或原文明确的匿名对象。能判断对象不等于能关联具体地点。"
+        "linked表示已明确关联具体提及；明确对象不是单个已提及地点时保留object_text，mention_id=null、link_status=unlinked；对象确实有歧义才object_text=''、mention_id=null、link_status=uncertain。"
+        "例如'哪个区域离甲站近'对象保留区域与甲站的距离比较，不把甲站当作被点评地点；'1号线比7号线时间长'保留两线时长比较。"
+        "未命名老巷、整体路线或攻略内容明确时不要留空，也不猜具体地名；无上下文的'可以'，或船线与景点均可能的'明天开放吗'仍弃判。"
         "dimension写原文支持的主要维度，确实不明用unknown；中性费用/时间事实可以stance=unknown，不能因此省略已明确的对象和维度。"
-        "点赞/收藏/种草/期待/夸图片不能算亲历，未明确到访不猜测experience；行程过满、整体路线/时间反馈对象为行程或原文全程，object_text写该对象、mention_id=null、link_status=unlinked。"
-        "笔记和图片含多个线路/景点时，不能仅凭标题把主体不明评论关联主地点；明确的整体路线、票务、比较、出行意向可概括object_text和主要dimension、mention_id=null、link_status=unlinked，真正指代歧义则object_text为空、mention_id=null、link_status=uncertain，不能把所有评论分给所有地点；局部营地/分店问题不得扩大为整片区域的政策。"
+        "到访仅证明亲历，不证明好评：'前天去了'、'三年前来过'可nature=experience但stance=unknown；表情和感叹号不单独决定地点立场。点赞/收藏/种草/期待/夸图片不能算亲历。"
+        "笔记和图片含多个线路/景点时，不能仅凭标题猜主体，也不能把评论分给所有地点；局部营地/分店问题不得扩大为整片区域政策。"
         "同一评论的停运断言、亲自白跑和问句应按连续原文分段提取，不由到场推出停运时长；指南中的价格、时间和规则描述也不自动算作者亲历。"
         "每条证据明确写link_status：linked须有明确mention_id，unlinked须mention_id=null；不能遗漏状态而假定已关联。"
         "好像/听说保持不确定，疑问不能变成当前关闭、售罄、预约、气候事实。只输出quote支持的对象，不虚构答案、坐标、当前票价。"
@@ -528,10 +594,15 @@ async def extract_note(
     )
 
     def validate(output):
-        result = validate_note_extraction(output, sources, comment_ids, submitted)
+        result, activity_validation = _validate_sections(
+            output, sources, comment_ids, submitted
+        )
         for item in result.evidence:
             item.model_id = settings.model_id
-        return result
+        return {
+            **result.model_dump(mode="json"),
+            "activity_validation": settings.redact(activity_validation),
+        }
 
     result = await structured_call(
         client,
