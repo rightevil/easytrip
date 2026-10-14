@@ -1,4 +1,4 @@
-"""Read-only P2 review export and scoring; never generate human labels."""
+"""Read-only P2 review scoring with explicit human or assistant provenance."""
 
 import argparse
 import hashlib
@@ -117,10 +117,10 @@ def export_review(database, run_id, output):
     return metadata
 
 
-def labelled(human, row):
-    if not isinstance(human, dict) or human.get("reviewer_kind") != "human" or not isinstance(human.get("reviewer"), str) or not human["reviewer"].strip():
+def labelled(human, row, *, reviewer_kind="human"):
+    if not isinstance(human, dict) or human.get("reviewer_kind") != reviewer_kind or not isinstance(human.get("reviewer"), str) or not human["reviewer"].strip():
         return False
-    if re.search(r"(?i)\b(?:assistant|chatgpt|codex|agnes|claude|llm|gpt)\b", human["reviewer"]):
+    if reviewer_kind == "human" and re.search(r"(?i)\b(?:assistant|chatgpt|codex|agnes|claude|llm|gpt)\b", human["reviewer"]):
         return False
     if row["kind"] == "note":
         forms = human.get("source_forms")
@@ -135,7 +135,12 @@ def labelled(human, row):
     return all(type(human.get(key)) is bool for key in CHECKS) and type(human.get("missed_judgements")) is int and human["missed_judgements"] >= 0 and isinstance(human.get("error_types"), list) and all(isinstance(item, str) for item in human["error_types"])
 
 
-def score_review(database, run_id, labels, output):
+def score_review(database, run_id, labels, output, *, reviewer_kind="human"):
+    if reviewer_kind not in {"human", "assistant"}:
+        raise ValueError("评审身份必须为human或assistant")
+    label_key = "human" if reviewer_kind == "human" else "assistant"
+    review_name = "人工" if reviewer_kind == "human" else "AI"
+    invalid_key = "invalid_or_nonhuman_labels" if reviewer_kind == "human" else "invalid_or_nonassistant_labels"
     baseline, metadata = load_sample(database, run_id)
     supplied = {}
     for line in Path(labels).read_text(encoding="utf-8-sig").splitlines():
@@ -148,7 +153,7 @@ def score_review(database, run_id, labels, output):
     expected_ids = {row["source_id"] for row in baseline}
     if set(supplied) - expected_ids:
         raise ValueError("标签来源不属于固定样本")
-    counts = Counter(dict.fromkeys(("unlabelled", "missing_rows", "invalid_or_nonhuman_labels", "notes_checked", "notes_failed", "comments_labelled", "judgeable", "unable", "judged_judgeable", "abstained_judgeable", "model_judged_unable", "model_poi_linked_comments", "missed_judgements", "object_dimension_correct", *CHECKS), 0))
+    counts = Counter(dict.fromkeys(("unlabelled", "missing_rows", invalid_key, "notes_checked", "notes_failed", "comments_labelled", "judgeable", "unable", "judged_judgeable", "abstained_judgeable", "model_judged_unable", "model_poi_linked_comments", "missed_judgements", "object_dimension_correct", *CHECKS), 0))
     cases, forms, errors = Counter(), Counter(), Counter()
     for row in baseline:
         reviewed = supplied.get(row["source_id"])
@@ -156,13 +161,18 @@ def score_review(database, run_id, labels, output):
             counts["missing_rows"] += 1
             counts["unlabelled"] += 1
             continue
-        if fingerprint(reviewed) != fingerprint(row):
-            raise ValueError("仅允许修改 human 标签，原文和模型结果不可改写")
-        human = reviewed.get("human")
-        if not labelled(human, row):
+        immutable = reviewed
+        if reviewer_kind == "assistant":
+            if reviewed.get("human") != row.get("human"):
+                raise ValueError("AI评分不得改写human字段")
+            immutable = {key: value for key, value in reviewed.items() if key != "assistant"}
+        if fingerprint(immutable) != fingerprint(row):
+            raise ValueError(f"仅允许修改 {label_key} 标签，原文和模型结果不可改写")
+        human = reviewed.get(label_key)
+        if not labelled(human, row, reviewer_kind=reviewer_kind):
             counts["unlabelled"] += 1
             if isinstance(human, dict) and human.get("reviewer_kind") is not None:
-                counts["invalid_or_nonhuman_labels"] += 1
+                counts[invalid_key] += 1
             continue
         if row["kind"] == "note":
             counts["notes_checked"] += int(human["checked"])
@@ -192,23 +202,26 @@ def score_review(database, run_id, labels, output):
     if metadata["selected_notes"] < MIN_NOTES or metadata["selected_comments"] < MIN_COMMENTS:
         reasons.append("样本不足20篇笔记或100条评论")
     if counts["unlabelled"]:
-        reasons.append("存在未标注、遗漏或无效/非人工标签")
+        reasons.append(f"存在未标注、遗漏或无效/非{review_name}标签")
     if counts["notes_checked"] < MIN_NOTES or counts["comments_labelled"] < MIN_COMMENTS:
-        reasons.append("人工检查数量不足")
+        reasons.append(f"{review_name}检查数量不足")
     if counts["notes_failed"]:
-        reasons.append("有笔记人工检查未通过")
+        reasons.append(f"有笔记{review_name}检查未通过")
     if not {"negation", "mixed", "reference"} <= set(cases):
-        reasons.append("否定、混合或指代样本范围尚未人工确认")
+        reasons.append(f"否定、混合或指代样本范围尚未{review_name}确认")
     if accuracy is None or accuracy < 0.9:
         reasons.append("对象及主要维度正确率未达到90%或无有效分母")
     if coverage is None or coverage < 0.8:
-        reasons.append("人工可判评论覆盖率未达到80%或无有效分母")
+        reasons.append(f"{review_name}可判评论覆盖率未达到80%或无有效分母")
     secondary = {key: {"numerator": counts[key], "denominator": counts["judged_judgeable"], "rate": counts[key] / counts["judged_judgeable"] if counts["judged_judgeable"] else None} for key in CHECKS}
-    report = {**metadata, "verdict": "not_passed" if reasons else "pass", "reasons": reasons, "counts": dict(counts), "accuracy": {"numerator": counts["object_dimension_correct"], "denominator": counts["judged_judgeable"], "rate": accuracy}, "coverage": {"numerator": counts["judged_judgeable"], "denominator": counts["judgeable"], "rate": coverage}, "secondary_checks": secondary, "case_types": dict(cases), "source_forms": dict(forms), "error_types": dict(errors), "scope": "仅固定样本的人工评论对象/主要维度门槛；笔记形态分布仅报告，不认证代表性，不能替代P2全部验收、图片核验或P3地点验收"}
+    scope = f"仅固定样本的{review_name}评论对象/主要维度门槛；笔记形态分布仅报告，不认证代表性，不能替代P2全部验收、图片核验或P3地点验收"
+    if reviewer_kind == "assistant":
+        scope += "；AI评审结果不等同真实人工验证"
+    report = {**metadata, "reviewer_kind": reviewer_kind, "reference_basis": "human_review" if reviewer_kind == "human" else "user_accepted_assistant_review", "verdict": "not_passed" if reasons else "pass", "reasons": reasons, "counts": dict(counts), "accuracy": {"numerator": counts["object_dimension_correct"], "denominator": counts["judged_judgeable"], "rate": accuracy}, "coverage": {"numerator": counts["judged_judgeable"], "denominator": counts["judgeable"], "rate": coverage}, "secondary_checks": secondary, "case_types": dict(cases), "source_forms": dict(forms), "error_types": dict(errors), "scope": scope}
     target = Path(output)
     target.mkdir(parents=True, exist_ok=False)
     (target / "score.json").write_text(dump_json(report), encoding="utf-8")
-    (target / "score.md").write_text("# P2 人工评论语义评分\n\n" + ("本样本门槛通过。" if not reasons else "未通过，不能宣称语义质量已验收。") + "\n\n```json\n" + dump_json(report) + "\n```\n", encoding="utf-8")
+    (target / "score.md").write_text(f"# P2 {review_name}评论语义评分\n\n" + ("本样本门槛通过。" if not reasons else "未通过，不能宣称语义质量已验收。") + ("AI评审结果不等同真实人工验证。" if reviewer_kind == "assistant" else "") + "\n\n```json\n" + dump_json(report) + "\n```\n", encoding="utf-8")
     return report
 
 
@@ -222,9 +235,10 @@ def main():
         child.add_argument("--output", required=True, type=Path, help="新的输出目录，不覆盖已有材料")
         if command == "score":
             child.add_argument("--labels", required=True, type=Path)
+            child.add_argument("--reviewer-kind", choices=("human", "assistant"), default="human", help="AI评分必须显式选择assistant；默认保持人工评分")
     args = parser.parse_args()
     try:
-        report = export_review(args.db, args.run, args.output) if args.command == "export" else score_review(args.db, args.run, args.labels, args.output)
+        report = export_review(args.db, args.run, args.output) if args.command == "export" else score_review(args.db, args.run, args.labels, args.output, reviewer_kind=args.reviewer_kind)
     except (ValueError, OSError, sqlite3.Error):
         parser.exit(2, "无法读取或校验材料：请确认数据库、任务、标签格式，以及输出目录不存在。\n")
     print(dump_json(report))

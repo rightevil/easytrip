@@ -52,6 +52,15 @@ def human_labels(rows):
     return result
 
 
+def assistant_labels(rows):
+    result = human_labels(rows)
+    for baseline, item in zip(rows, result, strict=True):
+        item["assistant"] = item["human"]
+        item["assistant"].update(reviewer_kind="assistant", reviewer="Codex AI")
+        item["human"] = json.loads(json.dumps(baseline["human"]))
+    return result
+
+
 def labels_file(tmp_path, rows):
     path = tmp_path / "labels.jsonl"
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
@@ -87,6 +96,74 @@ def test_comment_denominators_do_not_count_two_evidence_rows_twice(tmp_path):
     assert report["coverage"] == {"numerator": 80, "denominator": 100, "rate": 0.8}
     assert report["counts"]["abstained_judgeable"] == 20
     assert report["counts"]["missed_judgements"] == 20
+
+
+def test_explicit_assistant_score_preserves_identity_denominators_and_database(tmp_path):
+    path, run_id = corpus(tmp_path, judged=80)
+    before = path.read_bytes()
+    rows, _ = review.load_sample(path, run_id)
+    reviewed = assistant_labels(rows)
+    labels = labels_file(tmp_path, reviewed)
+    report = review.score_review(
+        path, run_id, labels, tmp_path / "ai-score", reviewer_kind="assistant"
+    )
+    assert report["verdict"] == "pass"
+    assert report["reviewer_kind"] == "assistant"
+    assert report["reference_basis"] == "user_accepted_assistant_review"
+    assert report["accuracy"] == {"numerator": 80, "denominator": 80, "rate": 1.0}
+    assert report["coverage"] == {"numerator": 80, "denominator": 100, "rate": 0.8}
+    assert report["counts"]["abstained_judgeable"] == 20
+    assert "不等同真实人工验证" in report["scope"]
+    assert all(row["human"]["reviewer_kind"] is None for row in reviewed)
+    assert path.read_bytes() == before
+    with pytest.raises(ValueError, match="原文和模型结果不可改写"):
+        review.score_review(path, run_id, labels, tmp_path / "default-score")
+
+
+@pytest.mark.parametrize("field", ["text", "model", "human"])
+def test_assistant_scoring_cannot_tamper_with_source_model_or_human_fields(tmp_path, field):
+    path, run_id = corpus(tmp_path)
+    rows, _ = review.load_sample(path, run_id)
+    reviewed = assistant_labels(rows)
+    reviewed[0][field] = {"tampered": True} if field != "text" else "改写的原文"
+    with pytest.raises(ValueError):
+        review.score_review(
+            path, run_id, labels_file(tmp_path, reviewed), tmp_path / "score",
+            reviewer_kind="assistant",
+        )
+    assert not (tmp_path / "score").exists()
+
+
+def test_assistant_mode_rejects_mismatched_reviewer_identity(tmp_path):
+    path, run_id = corpus(tmp_path)
+    rows, _ = review.load_sample(path, run_id)
+    reviewed = assistant_labels(rows)
+    for row in reviewed:
+        row["assistant"]["reviewer_kind"] = "human"
+    report = review.score_review(
+        path, run_id, labels_file(tmp_path, reviewed), tmp_path / "score",
+        reviewer_kind="assistant",
+    )
+    assert report["verdict"] == "not_passed"
+    assert report["counts"]["invalid_or_nonassistant_labels"] == 120
+    assert report["accuracy"]["rate"] is None
+    assert report["coverage"]["rate"] is None
+
+
+def test_cli_requires_explicit_assistant_mode_and_reports_its_basis(tmp_path, monkeypatch, capsys):
+    path, run_id = corpus(tmp_path)
+    rows, _ = review.load_sample(path, run_id)
+    labels = labels_file(tmp_path, assistant_labels(rows))
+    monkeypatch.setattr(review.sys, "argv", [
+        "p2_review.py", "score", "--db", str(path), "--run", run_id,
+        "--labels", str(labels), "--output", str(tmp_path / "cli-score"),
+        "--reviewer-kind", "assistant",
+    ])
+    review.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["reviewer_kind"] == "assistant"
+    assert report["reference_basis"] == "user_accepted_assistant_review"
+    assert report["verdict"] == "pass"
 
 
 def test_omitted_objects_reduce_accuracy_even_when_existing_rows_are_correct(tmp_path):

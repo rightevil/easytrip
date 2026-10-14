@@ -2,7 +2,21 @@
 
 2026-10-13，用户明确跳过逐条人工审核，采用已完成的 AI 初评继续收尾。当前评审依据为本机 `reports/p2/assistant-review.json` 与 `.md`：20 篇笔记、100 条评论，91 条原文可判、9 条上下文不足；评审身份保持 `assistant`，已有 5 条用户真实反馈另行保留。决策记录为 `reports/p2/ai-review-decision.json`。不再要求用户填写 JSON 或回复后续审核批次。
 
-AI 初评不替代 Agnes 实际输出，也不证明模型准确率或覆盖率达到 90%/80%。下文为日后需要正式人工测量时的可选流程，离线评分工具仍只接受真实人工标签；缺少结果保持未验证，不把 AI 标签改成 `human`。
+AI 初评不替代 Agnes 实际输出，也不能仅凭原文可判数量证明模型正确率或覆盖率达到 90%/80%。2026-10-14 用户要求完成语义质量验收，采用已接受的 AI 参考判断与实际 Agnes 输出比较；评分工具提供显式 AI 模式，默认仍保持人工模式，不把 AI 标签改成 `human`。
+
+## 本次使用的 AI 评审模式
+
+固定原 20 篇笔记、100 条评论及初评文件指纹，比较新评测轮的有效 Agnes 输出。缺失输出、引用失败与未判断评论保留在固定样本中，不因模型失败删掉难例或缩小覆盖率分母；既有 5 条真实反馈单独保留，旧模型的正确性反馈不能直接移植到新输出。模型请求仍使用现有抽取服务、关闭系统代理继承并开启 thinking；本次图片未提交，结论仅涉及文本，不认证图片理解。
+
+新评分材料保持导出的原文、模型字段与空 `human` 字段不变，另加 `assistant` 标签，字段要求与下方人工标签相同，但 `reviewer_kind` 必须为 `assistant`。标签是助手逐条比较后的判断，评分工具不会生成；只有显式选择 AI 模式才接受，且该模式禁止改写 `human`。输出报告记录 `reviewer_kind=assistant` 与 `reference_basis=user_accepted_assistant_review`，即使门槛达标也不等同真实人工验证。
+
+```powershell
+uv --directory backend run python ../scripts/p2_review.py score --db ../reports/p2/semantic-20261014/evaluation.sqlite3 --run <新评测任务ID> --labels ../reports/p2/semantic-20261014/review-labelled.jsonl --output ../reports/p2/semantic-20261014/score --reviewer-kind assistant
+```
+
+两种模式共用固定样本和评论分母：正确率按已作判断的可判评论计算，主要对象或维度漏判也算错；覆盖率按所有参考可判评论计算，未输出或弃判不从分母排除。下文的人类标签流程仅供日后选择正式人工验证时使用。
+
+## 可选人工复核
 
 `scripts/p2_review.py` 是纯标准库离线工具。它用 SQLite `mode=ro`、`query_only` 和一个只读事务读取指定 `discover` run，不初始化、不迁移、不修改正式数据库，也不请求小红书或模型。优先使用 `reports/p2` 中的隔离数据库与已经停止的分析任务。
 
