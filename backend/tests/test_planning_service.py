@@ -1,12 +1,51 @@
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from easytrip.domain.models import ActivityConstraint, TripRequest
-from easytrip.integrations.amap import AmapBudgetExceeded
+from easytrip.integrations.amap import Amap, AmapBudgetExceeded
 from easytrip.services.planning import schedule
+from easytrip.services.routes import RouteProvider
+from easytrip.storage.database import Database
+from easytrip.storage.planning import planning_hash
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(
+        "easytrip.services.planning._current_time",
+        lambda: datetime(2026, 10, 14, 9, tzinfo=timezone.utc),
+    )
+
+
+def parent_snapshot(value, suggestion=None):
+    suggestion = suggestion or run(value, max_combinations=1)[0]
+    payload = deepcopy(suggestion["payload"])
+    signature = planning_hash(payload["input"])
+    payload["input"]["input_hash"] = signature
+    return {
+        "id": "parent-1",
+        "trip_id": value["trip_id"],
+        "input_hash": signature,
+        "payload": payload,
+        "status": suggestion["status"],
+    }
+
+
+def progress(value, at="2026-10-15T10:00:00+08:00", location=None):
+    value["request"]["planning"].update(
+        progress_at=at,
+        progress_origin={
+            "name": "用户明确的当前位置",
+            "source": "map",
+            "city": "杭州市",
+            "location": location or [120.1, 30.2],
+        },
+    )
+    return value
 
 
 def inputs(count=2, **request_changes):
@@ -271,6 +310,16 @@ def test_shared_vehicle_only_hard_deadline_is_not_promised_as_feasible():
     assert "shared_only_appointment" in codes(plan, "conflicts")
 
 
+def test_unknown_shared_only_route_cannot_satisfy_user_available_duration_deadline():
+    value = inputs(1, duration_minutes=180)
+    result = run(value, Routes(unavailable=("walking", "transit")), max_combinations=1)[
+        0
+    ]
+    assert legs(result)[0]["leg"]["mode"] in {"bicycling", "electrobike"}
+    assert result["status"] == "conflict"
+    assert "shared_only_appointment" in codes(result, "conflicts")
+
+
 def test_transit_total_duration_does_not_double_count_walking():
     provider = Routes(transit={"duration_seconds": 600, "walking_distance_meters": 700})
     plan = run(inputs(1, transport="transit"), provider)[0]
@@ -406,13 +455,17 @@ def test_completed_and_locked_without_parent_fail_before_queries():
 def test_completed_snapshot_is_retained_without_requerying_its_route():
     value = inputs()
     previous = run(value, max_combinations=1)[0]
-    parent = {"trip_id": value["trip_id"], "payload": previous["payload"]}
+    parent = parent_snapshot(value, previous)
     constraint(value, state="completed")
-    value["request"]["start_at"] = "2026-10-15T10:00:00+08:00"
-    value["origin"]["location"] = [120.11, 30.2]
+    progress(value, location=[120.11, 30.2])
+    value["active_plan_id"] = parent["id"]
     provider = Routes()
     plan = run(value, provider, parent_plan=parent)[0]
-    assert activities(plan)[0] == {**activities(previous)[0], "state": "completed"}
+    assert activities(plan)[0] == {
+        **activities(previous)[0],
+        "state": "completed",
+        "historical": True,
+    }
     assert {call[2][0] for call in provider.calls} == {
         value["selected"][1]["poi"]["location"][0]
     }
@@ -425,7 +478,7 @@ def test_completed_snapshot_is_retained_without_requerying_its_route():
 def test_locked_parent_appointment_is_not_moved_to_hide_late_arrival():
     value = inputs(1)
     previous = run(value)[0]
-    parent = {"trip_id": value["trip_id"], "payload": previous["payload"]}
+    parent = parent_snapshot(value, previous)
     constraint(value, locked=True)
     value["request"]["start_at"] = "2026-10-15T10:00:00+08:00"
     result = run(value, parent_plan=parent)[0]
@@ -565,3 +618,329 @@ def test_provider_and_user_origin_city_conflict_requires_correction():
         plan, "conflicts"
     )
     assert not provider.calls
+
+
+def test_unchanged_prefix_is_reused_and_only_changed_suffix_routes_are_queried():
+    value = inputs(3)
+    previous = run(value, max_combinations=1)[0]
+    parent = parent_snapshot(value, previous)
+    constraint(value, 2, duration_minutes=45)
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent, max_combinations=1)[0]
+    assert result["payload"]["itinerary"][:6] == previous["payload"]["itinerary"][:6]
+    assert {call[2][0] for call in provider.calls} == {
+        value["selected"][2]["poi"]["location"][0]
+    }
+    assert len(provider.calls) == 2
+    assert result["payload"]["usage"]["reused_route_count"] == 2
+    assert activities(result)[2]["duration_minutes"] == 45
+    assert "unchanged_prefix_reused" in codes(result, "diff")
+
+
+def test_lowered_walking_limit_recalculates_incompatible_prefix_with_safe_transit():
+    value = inputs(1)
+    parent = parent_snapshot(value)
+    value["request"]["planning"]["max_walk_meters"] = 100
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent, max_combinations=1)[0]
+    assert len(provider.calls) == 2
+    assert [item["leg"]["mode"] for item in legs(result)] == ["transit"]
+    assert result["payload"]["usage"]["walking_distance_meters"] == 100
+    assert "walking_limit" not in codes(result, "conflicts")
+
+
+def test_progress_preserves_spent_cost_and_walk_when_choosing_affected_suffix():
+    value = constraint(inputs(), cost_cny=12)
+    previous = run(value, max_combinations=1)[0]
+    parent = parent_snapshot(value, previous)
+    constraint(value, state="completed")
+    progress(value, at=activities(previous)[0]["end_at"], location=[120.1, 30.2])
+    value["active_plan_id"] = parent["id"]
+    value["request"]["planning"].update(max_walk_meters=600)
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent, max_combinations=1)[0]
+    assert result["payload"]["itinerary"][:3] == [
+        {
+            **item,
+            "historical": True,
+            **({"state": "completed"} if item["kind"] == "activity" else {}),
+        }
+        for item in previous["payload"]["itinerary"][:3]
+    ]
+    assert len(provider.calls) == 2 and legs(result)[-1]["leg"]["mode"] == "transit"
+    usage = result["payload"]["usage"]
+    assert usage["historical_known_cost_cny"] == 12
+    assert usage["historical_walking_distance_meters"] == 500
+    assert usage["walking_distance_meters"] == 600
+    assert "walking_limit" not in codes(result, "conflicts")
+
+
+def test_progress_returns_to_original_origin_instead_of_new_current_position():
+    value = inputs()
+    value["request"]["planning"]["return_to_origin"] = True
+    parent = parent_snapshot(value)
+    constraint(value, state="completed")
+    progress(value, at=activities({"payload": parent["payload"]})[0]["end_at"])
+    value["active_plan_id"] = parent["id"]
+    result = run(value, parent_plan=parent, max_combinations=1)[0]
+    assert legs(result)[-1]["leg"]["destination"] == value["origin"]["location"]
+    assert (
+        legs(result)[-1]["leg"]["destination"]
+        != value["request"]["planning"]["progress_origin"]["location"]
+    )
+
+
+def test_equal_completion_time_at_other_position_keeps_actual_movement_unknown():
+    value = inputs()
+    previous = run(value, max_combinations=1)[0]
+    parent = parent_snapshot(value, previous)
+    constraint(value, state="completed")
+    progress(value, at=activities(previous)[0]["end_at"], location=[120.8, 30.2])
+    value["active_plan_id"] = parent["id"]
+    result = run(value, parent_plan=parent, max_combinations=1)[0]
+    assert "progress_movement_unknown" in codes(result)
+    assert not result["payload"]["usage"]["walking_known"]
+    assert result["payload"]["usage"]["unknown_cost_items"] > 0
+
+
+def test_skipped_then_completed_history_keeps_snapshots_without_fictitious_travel():
+    value = inputs(3)
+    for index in range(3):
+        constraint(value, index, cost_cny=5)
+    previous = run(value, Routes(walking={"cost_cny": 1}), max_combinations=1)[0]
+    parent = parent_snapshot(value, previous)
+    constraint(value, 0, state="skipped")
+    constraint(value, 1, state="completed")
+    progress(value, at="2026-10-15T10:45:00+08:00", location=[120.11, 30.2])
+    value["active_plan_id"] = parent["id"]
+    provider = Routes(walking={"cost_cny": 1})
+    result = run(value, provider, parent_plan=parent, max_combinations=1)[0]
+    first, second, third = activities(result)
+    assert (first["state"], second["state"], third["state"]) == (
+        "skipped",
+        "completed",
+        "pending",
+    )
+    assert first["untravelled"] and first["execution_unknown"]
+    assert all(
+        item["historical"] and item["execution_unknown"] for item in legs(result)[:2]
+    )
+    assert {call[2][0] for call in provider.calls} == {
+        value["selected"][2]["poi"]["location"][0]
+    }
+    for actual, original in zip(
+        result["payload"]["itinerary"][:6], previous["payload"]["itinerary"][:6]
+    ):
+        ignored = {"historical", "execution_unknown", "untravelled", "state"}
+        assert {key: val for key, val in actual.items() if key not in ignored} == {
+            key: val for key, val in original.items() if key not in ignored
+        }
+    usage = result["payload"]["usage"]
+    assert usage["historical_known_cost_cny"] == 5
+    assert usage["historical_walking_distance_meters"] == 0
+    assert usage["known_cost_cny"] == 11
+    assert usage["walking_distance_meters"] == 500
+    assert not usage["walking_known"] and "historical_execution_unknown" in codes(
+        result
+    )
+    assert result["status"] == "conditional"
+
+
+def test_unconfirmed_pending_before_completed_requires_explicit_history_state():
+    value = inputs(3)
+    parent = parent_snapshot(value)
+    constraint(value, 1, state="completed")
+    progress(value, at="2026-10-15T11:00:00+08:00", location=[120.11, 30.2])
+    value["active_plan_id"] = parent["id"]
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent)[0]
+    assert result["status"] == "conflict" and "historical_state_unconfirmed" in codes(
+        result, "conflicts"
+    )
+    assert not provider.calls
+
+
+def test_completed_parent_fact_cannot_be_erased_by_deleting_current_constraint():
+    value = inputs()
+    parent = parent_snapshot(value)
+    constraint(value, state="completed")
+    progress(value, at="2026-10-15T10:00:00+08:00", location=[120.1, 30.2])
+    value["active_plan_id"] = parent["id"]
+    current = run(value, parent_plan=parent, max_combinations=1)[0]
+    parent = parent_snapshot(value, current)
+    value["request"]["planning"]["activity_constraints"] = [
+        item
+        for item in value["request"]["planning"]["activity_constraints"]
+        if item["candidate_id"] != "candidate-0"
+    ]
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent)[0]
+    assert result["status"] == "conflict"
+    assert "completed_state_regressed" in codes(result, "conflicts")
+    assert not provider.calls
+
+
+def test_moving_current_date_cannot_hide_cross_day_completed_history():
+    value = inputs()
+    parent = parent_snapshot(value)
+    constraint(value, state="completed")
+    value["request"]["start_at"] = "2026-10-16T09:00:00+08:00"
+    progress(value, at="2026-10-16T10:00:00+08:00", location=[120.1, 30.2])
+    value["active_plan_id"] = parent["id"]
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent)[0]
+    assert result["status"] == "partial" and "single_day_unsupported" in codes(result)
+    assert not provider.calls
+    assert parent["payload"]["itinerary"][2]["start_at"].startswith("2026-10-15")
+
+
+def test_expired_future_prefix_is_queried_again_but_completed_history_is_retained():
+    value = inputs()
+    parent = parent_snapshot(value)
+    for item in parent["payload"]["itinerary"]:
+        if item["kind"] == "route":
+            item["leg"]["valid_until"] = "2026-10-14T08:00:00+00:00"
+    constraint(value, state="completed")
+    progress(value, at=activities({"payload": parent["payload"]})[0]["end_at"])
+    value["active_plan_id"] = parent["id"]
+    provider = Routes()
+    result = run(value, provider, parent_plan=parent, max_combinations=1)[0]
+    assert legs(result)[0]["historical"]
+    assert legs(result)[0]["leg"]["valid_until"] == "2026-10-14T08:00:00+00:00"
+    assert len(provider.calls) == 2
+    assert result["payload"]["valid_until"] == "2026-10-16T09:00:00+08:00"
+
+
+def meal_candidate(value):
+    return {
+        **deepcopy(value["selected"][0]),
+        "candidate_id": "meal-1",
+        "category": "eat",
+        "meal_window": {
+            "period": "lunch",
+            "start_at": "2026-10-15T11:00:00+08:00",
+            "end_at": "2026-10-15T14:00:00+08:00",
+            "anchor_candidate_id": "candidate-0",
+        },
+        "constraint": {
+            "candidate_id": "meal-1",
+            "duration_minutes": 45,
+            "duration_source": "estimated",
+            "cost_cny": None,
+            "cost_source": "unknown",
+            "not_before": "2026-10-15T11:00:00+08:00",
+            "not_after": "2026-10-15T14:00:00+08:00",
+        },
+    }
+
+
+def test_supplement_with_matching_constraint_id_has_actual_routes_and_lunch_window():
+    value = inputs(1)
+    value["request"]["start_at"] = "2026-10-15T10:30:00+08:00"
+    constraint(value, duration_minutes=90)
+    meal = meal_candidate(value)
+    provider = Routes()
+    result = run(value, provider, supplemental_candidates=[meal], max_combinations=1)[0]
+    placed = next(
+        item for item in activities(result) if item["candidate_id"] == "meal-1"
+    )
+    assert placed["start_at"] == meal["constraint"]["not_before"]
+    assert placed["end_at"] == "2026-10-15T11:45:00+08:00"
+    assert len(legs(result)) == 2 and len(provider.calls) == 4
+    assert placed["cost_cny"] is None and placed["duration_source"] == "estimated"
+    assert "meal_gap" not in codes(result) and result["status"] == "conditional"
+    assert value["selected_ids"] == ["candidate-0"]
+
+
+def test_supplement_constraint_cannot_impersonate_another_activity():
+    value = inputs()
+    meal = meal_candidate(value)
+    meal["constraint"]["candidate_id"] = "candidate-0"
+    provider = Routes()
+    with pytest.raises(ValueError, match="约束标识不一致"):
+        run(value, provider, supplemental_candidates=[meal])
+    assert not provider.calls
+
+
+def test_skipped_lunch_snapshot_does_not_count_as_eaten():
+    value = inputs(3)
+    value["request"]["start_at"] = "2026-10-15T10:30:00+08:00"
+    value["selected"][0]["category"] = "eat"
+    parent = parent_snapshot(value)
+    constraint(value, 0, state="skipped")
+    constraint(value, 1, state="completed")
+    progress(value, at="2026-10-15T12:10:00+08:00", location=[120.11, 30.2])
+    value["active_plan_id"] = parent["id"]
+    result = run(value, parent_plan=parent, max_combinations=1)[0]
+    assert "meal_gap" in codes(result)
+
+
+@pytest.mark.parametrize(
+    "constraint_source", ["dietary", "preferences", "inherited_meal"]
+)
+def test_existing_meals_always_show_explicit_dietary_uncertainty(constraint_source):
+    value = inputs(1)
+    value["request"]["start_at"] = "2026-10-15T10:30:00+08:00"
+    if constraint_source == "inherited_meal":
+        parent = parent_snapshot(
+            value,
+            run(
+                value,
+                supplemental_candidates=[meal_candidate(value)],
+                max_combinations=1,
+            )[0],
+        )
+    else:
+        value["selected"][0]["category"] = "eat"
+        parent = None
+    if constraint_source == "preferences":
+        value["request"]["preferences"] = "不能吃坚果，有过敏"
+    else:
+        value["request"]["planning"]["dietary_restrictions"] = ["坚果过敏"]
+    result = run(value, parent_plan=parent, max_combinations=1)[0]
+    assert "dietary_unverified" in codes(result)
+    assert result["status"] == "conditional"
+
+
+def test_map_precision_uses_actual_amap_coordinate_normalization(tmp_path):
+    value = inputs(1, transport="walking")
+    value["origin"]["location"] = [120.050000231, 30.200000181]
+    value["selected"][0]["poi"]["location"] = [120.100000232, 30.200000181]
+    store = Database(tmp_path / "precision.sqlite3")
+    store.initialize()
+
+    def handler(request):
+        start, finish = request.url.params["origin"], request.url.params["destination"]
+        return httpx.Response(
+            200,
+            json={
+                "status": "1",
+                "infocode": "10000",
+                "route": {
+                    "paths": [
+                        {
+                            "distance": "500",
+                            "cost": {"duration": "600"},
+                            "steps": [{"polyline": f"{start};{finish}"}],
+                        }
+                    ]
+                },
+            },
+        )
+
+    async def execute():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ) as client:
+            return await schedule(
+                value,
+                RouteProvider(Amap(client, "fixture-key"), store),
+                max_combinations=1,
+            )
+
+    result = asyncio.run(execute())[0]
+    assert result["status"] == "conditional" and len(legs(result)) == 1
+    assert legs(result)[0]["leg"]["origin"] == [120.05, 30.2]
+    assert activities(result)[0]["start_at"] == "2026-10-15T09:20:00+08:00"
+    invalid = run(value, Routes(walking={"origin": [120.050001, 30.2]}))[0]
+    assert invalid["status"] == "partial" and not legs(invalid)

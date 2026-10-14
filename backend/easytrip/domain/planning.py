@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from .discovery_tasks import DiscoveryBudget, DiscoveryUsage
-from .models import Model, Version
+from .models import Identifier, Model, Version
 
 PLAN_STAGES = ("planning_input", "routing", "scheduled")
 
@@ -29,6 +29,7 @@ class PlanningUsage(DiscoveryUsage):
     amap_calls: int = Field(default=0, strict=True, ge=0)
     route_calls: int = Field(default=0, strict=True, ge=0)
     city_calls: int = Field(default=0, strict=True, ge=0)
+    poi_calls: int = Field(default=0, strict=True, ge=0)
     cache_hits: int = Field(default=0, strict=True, ge=0)
 
 
@@ -49,6 +50,7 @@ class PlanningCheckpoint(Model):
 
 class PlanPayload(Model):
     input: dict
+    supplements: list[dict] = Field(default_factory=list, max_length=4)
     itinerary: list[dict] = Field(default_factory=list, max_length=300)
     unknowns: list[dict] = Field(default_factory=list, max_length=300)
     conflicts: list[dict] = Field(default_factory=list, max_length=300)
@@ -77,3 +79,12 @@ class AdoptPlan(Model):
     operation_id: UUID
     expected_version: Version
     input_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
+
+
+class ReplacePlanningCandidate(Model):
+    operation_id: UUID
+    expected_version: Version
+    expected_workspace_version: Version
+    input_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
+    candidate_id: Identifier
+    replacement_id: Identifier

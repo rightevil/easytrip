@@ -239,7 +239,8 @@ class RouteProvider:
         ).hexdigest()
         cached = self.database.cached_route(key)
         if cached is not None:
-            return cached
+            # The wire query uses minutes; only this plan's departure input changes on reuse.
+            return {**cached, "departure_at": local.isoformat()}
         code = None
         try:
             if mode == "transit":

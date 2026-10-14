@@ -70,7 +70,9 @@ class ActionStore:
             budget = json.loads(row["budget_json"])
             usage = json.loads(row["usage_json"])
             if row["kind"] == "plan" and params.get("service") == "amap":
-                if usage.get("amap_calls", 0) >= budget["max_routes"] or usage.get("unknown_result_calls", 0):
+                if usage.get("amap_calls", 0) >= budget["max_routes"] or usage.get(
+                    "unknown_result_calls", 0
+                ):
                     return None
                 usage["amap_calls"] = usage.get("amap_calls", 0) + 1
             if self._elapsed_usage(row)["elapsed_seconds"] >= budget["max_seconds"]:
@@ -185,8 +187,16 @@ class ActionStore:
             )
             run = self._run_row(connection, row["run_id"])
             total = json.loads(run["usage_json"])
-            if updated_usage.get("amap_kind") in {"route", "city"} and not previous_usage.get("amap_kind"):
-                counter = "route_calls" if updated_usage["amap_kind"] == "route" else "city_calls"
+            if updated_usage.get("amap_kind") in {
+                "route",
+                "city",
+                "poi",
+            } and not previous_usage.get("amap_kind"):
+                counter = {
+                    "route": "route_calls",
+                    "city": "city_calls",
+                    "poi": "poi_calls",
+                }[updated_usage["amap_kind"]]
                 total[counter] = total.get(counter, 0) + 1
             total["unknown_result_calls"] = max(
                 0,

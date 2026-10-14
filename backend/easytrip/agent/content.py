@@ -217,9 +217,10 @@ async def analyse(runner, run, snapshot, client):
 
 async def analysed(runner, run):
     result = []
+    prefix = "meals:extract:" if run.get("kind") == "plan" else "extract:"
     for record in await records(runner, run):
         extraction = await runner.db(
-            "get_run_item", run["id"], "extract:" + record["note"]["source_id"]
+            "get_run_item", run["id"], prefix + record["note"]["source_id"]
         )
         if extraction and extraction.get("status") == "passed":
             result.append((record, extraction))

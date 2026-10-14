@@ -2,7 +2,7 @@
 
 数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
-当前连续数据库迁移为 6（`006_routes.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 已接通真实路线与单日排程，餐饮补查与局部调整正在分步实现。
+当前连续数据库迁移为 7（`007_planning_replacements.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 已接通真实路线与单日排程，餐饮有限补查与后缀排程已接通。
 
 | 方法与路径 | 请求 / 返回 |
 |---|---|
@@ -87,12 +87,18 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 | 方法与路径 | 契约 |
 |---|---|
 | `GET /api/trips/{id}/planning-input` | 返回 `trip_id/request_version/request/planning/origin/selected_ids/selected/missing/input_hash/active_plan_id`；冻结本行程已确认的 POI、活动与来源 |
+| `GET /api/trips/{id}/planning-replacements` | 本行程已唯一确认且同城的备选，不因仅修改时间而要求重新采集；返回行程和两个版本、`candidates` |
+| `POST /api/trips/{id}/planning-replace` | UUID `operation_id`、条件和工作区两个版本、`input_hash/candidate_id/replacement_id`；原子替换选择，保护完成/必去/锁定/预约，保留地图与当前采用指针；返回 `{trip,operation_applied}` |
 | `GET /api/trips/{id}/plans` | 返回不可变版本 `items` 及 `active_plan_id`，最多最近 50 个 |
 | `GET /api/trips/{id}/plans/{plan_id}` | 只读所属行程方案；跨行程返回 404 |
 | `POST /api/trips/{id}/plans/{plan_id}/adopt` | UUID `operation_id`、`expected_version`（条件版本）、`input_hash`；校验当前条件、实质输入及有效期，返回 `{trip,plan}` |
 
 `TripRequest.planning` 保存返程终点/期限、步行上限、禁用模式、额外缓冲和 `activity_constraints`。每个活动的时长/费用必须同时标记 `user/source/estimated/unknown` 来源；空值为未知。必去/锁定不得同时排除或跳过，时间窗和预约使用有时区时间。普通条件 PATCH 会递增请求版本并沿用已有 CAS。
 
-只有服务端执行器可以写方案快照，客户端没有提交 `validated` 或伪造路线的接口。快照含冻结输入、时序、未知、冲突、用量、差异及有效期限。采用拒绝空、缺输入、草稿、部分、冲突或过期方案；条件、起点、选择变化后须重新校验。地图视野和来源全局重读元数据不影响输入签名。餐饮补查与局部重排仍在开发，P4 阶段尚未完成。
+只有服务端执行器可以写方案快照，客户端没有提交 `validated` 或伪造路线的接口。快照含冻结输入、时序、未知、冲突、用量、差异及有效期限。采用拒绝空、缺输入、草稿、部分、冲突或过期方案；条件、起点、选择变化后须重新校验。地图视野和来源全局重读元数据不影响输入签名。餐饮补查与后缀重排已接入服务端；最终真实流程与浏览器验收见 P4 记录。
 
 `POST /runs` 的 `kind="plan"` 使用单执行器、冻结输入、代次检查与调用账本，预算至多 3 组组合、40 次高德请求。公交耗时直接使用接口总时长，程序缓冲单独显示；路线缓存按方向、交通、城市、日期和时段区分。无交通、无权限、费用或开放时间未知时保留问题，不生成虚构时长。方案生成不会自动采用。响应中的 `operation_applied=true` 可确认此前采用操作已保存；重试返回服务端当前方案指针，不能重新覆盖后来采用的方案。
+
+`planning.progress_at/progress_origin` 必须成对，当前位置只能由用户明确提供地图坐标；保留原起点用于返程与整日期限。`dietary_restrictions` 不构成商家安全保证。完成、跳过和锁定从不可变当前方案检查；已发生历史与受影响后缀分开，只有未来路线要求当前有效，历史本身不可改写。未知历史移动不计算成确定步行或费用。旧版重新规划必须再次核对当前时间和进度。
+
+跨午晚餐的实际窗口触发同轮只读补查：最多 2 搜索、2 笔记、5 条评论、4 模型请求、0 图片，所有来源/模型请求沿用原账本，高德地点与路线共用 40 次额度。补充候选保存于 `payload.supplements`，不偷偷修改原选择或签名；排入时间表前重新校验路线和窗口。失败或额度用尽保留原路线和餐次缺口。Agnes 仍使用直接连接、thinking 与任务输出预算；未知结果不自动重放。

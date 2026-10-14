@@ -518,7 +518,7 @@ class DiscoveryStore:
             self._run_row(connection, run_id, trip_id)
             return run_id
         row = connection.execute(
-            "SELECT r.id FROM runs r WHERE r.trip_id=? AND r.request_version=? AND (EXISTS(SELECT 1 FROM candidates c WHERE c.run_id=r.id) OR EXISTS(SELECT 1 FROM gaps g WHERE g.run_id=r.id)) ORDER BY r.rowid DESC LIMIT 1",
+            "SELECT r.id FROM runs r WHERE r.trip_id=? AND r.request_version=? AND r.kind!='plan' AND (EXISTS(SELECT 1 FROM candidates c WHERE c.run_id=r.id) OR EXISTS(SELECT 1 FROM gaps g WHERE g.run_id=r.id)) ORDER BY r.rowid DESC LIMIT 1",
             (trip_id, trip["request_version"]),
         ).fetchone()
         return row["id"] if row is not None else None

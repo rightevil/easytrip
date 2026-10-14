@@ -2,13 +2,16 @@
 
 import asyncio
 from contextlib import suppress
+from copy import deepcopy
 from time import monotonic
 from uuid import NAMESPACE_URL, uuid5
 
 from ..domain.planning import PLAN_STAGES, PlanPayload, SavePlan
 from ..integrations.amap import Amap, AmapBudgetExceeded, AmapError
+from ..services.meals import supplement_meals
 from ..services.planning import schedule
 from ..services.routes import RouteProvider
+from .discovery import DiscoveryRunner
 
 
 class PlanningStopped(RuntimeError):
@@ -30,15 +33,12 @@ class PlanningRoutes(RouteProvider):
         return result
 
 
-class PlanningRunner:
+class PlanningRunner(DiscoveryRunner):
     def __init__(self, database, settings, *, client=None, before_request=None):
         self.database = database
         self.settings = settings
         self.client = client
         self.before_request = before_request
-
-    async def _db(self, method, *args, **kwargs):
-        return await asyncio.to_thread(getattr(self.database, method), *args, **kwargs)
 
     async def execute(self, run):
         generation = run["generation"]
@@ -49,10 +49,10 @@ class PlanningRunner:
             nonlocal action_id
             if self.before_request is not None:
                 await self.before_request()
-            if not await self._db("run_is_current", run["id"], generation):
+            if not await self.db("run_is_current", run["id"], generation):
                 raise PlanningStopped()
-            current = await self._db("get_run", run["id"])
-            action_id = await self._db(
+            current = await self.db("get_run", run["id"])
+            action_id = await self.db(
                 "begin_action",
                 run["id"],
                 generation,
@@ -73,13 +73,17 @@ class PlanningRunner:
                     if isinstance(error, AmapError) and error.infocode != "UNKNOWN"
                     else "unknown"
                 )
-                await self._db(
+                await self.db(
                     "finish_action",
                     action_id,
                     status=status,
                     result={"path": path, "response_received": payload is not None},
                     usage={
-                        "amap_kind": "city" if path == "v3/config/district" else "route"
+                        "amap_kind": "city"
+                        if path == "v3/config/district"
+                        else "poi"
+                        if path.startswith("v5/place/")
+                        else "route"
                     },
                 )
                 action_id = None
@@ -87,7 +91,7 @@ class PlanningRunner:
         try:
             remaining = run["budget"]["max_seconds"] - run["usage"]["elapsed_seconds"]
             if remaining <= 0:
-                await self._db(
+                await self.db(
                     "stop_run",
                     run["id"],
                     generation,
@@ -95,12 +99,13 @@ class PlanningRunner:
                     "time_budget_exhausted",
                 )
                 return
+            expires_at = monotonic() + remaining
             async with asyncio.timeout(remaining):
                 for stage in PLAN_STAGES:
-                    current = await self._db("get_run", run["id"])
+                    current = await self.db("get_run", run["id"])
                     if stage in current["checkpoint"]["completed_stages"]:
                         continue
-                    if not await self._db("run_is_current", run["id"], generation):
+                    if not await self.db("run_is_current", run["id"], generation):
                         return
                     stage_start = monotonic()
                     if stage == "planning_input":
@@ -118,13 +123,13 @@ class PlanningRunner:
                         )
 
                         async def is_current():
-                            return await self._db(
+                            return await self.db(
                                 "run_is_current", run["id"], generation
                             )
 
                         provider = PlanningRoutes(amap, self.database, is_current)
                         parent = (
-                            await self._db(
+                            await self.db(
                                 "get_plan",
                                 run["trip_id"],
                                 run["params"]["parent_plan_id"],
@@ -132,13 +137,113 @@ class PlanningRunner:
                             if run["params"].get("parent_plan_id")
                             else None
                         )
-                        output = await schedule(
-                            run["params"],
-                            provider,
-                            max_combinations=run["budget"]["max_combinations"],
-                            parent_plan=parent,
+                        initial = await self.db(
+                            "get_run_item", run["id"], "planning:initial_routes"
                         )
-                        frozen_usage = (await self._db("get_run", run["id"]))["usage"]
+                        if initial is None:
+                            output = await schedule(
+                                run["params"],
+                                provider,
+                                max_combinations=run["budget"]["max_combinations"],
+                                parent_plan=parent,
+                            )
+                            initial = {
+                                "suggestions": output,
+                                "cache_hits": provider.cache_hits,
+                            }
+                            if not await self.db(
+                                "save_run_item",
+                                run["id"],
+                                generation,
+                                "planning:initial_routes",
+                                initial,
+                            ):
+                                return
+                        else:
+                            output = initial["suggestions"]
+                            provider.cache_hits = initial["cache_hits"]
+                        meals = {"candidates": [], "gaps": [], "queries": []}
+                        # Reserve time to retain already obtained routes if meal lookup times out.
+                        meal_seconds = expires_at - monotonic() - 10
+                        if meal_seconds > 0:
+                            try:
+                                async with asyncio.timeout(meal_seconds):
+                                    meals = await supplement_meals(
+                                        self,
+                                        run,
+                                        self.client,
+                                        run["params"],
+                                        output,
+                                        amap,
+                                    )
+                                    if meals["candidates"]:
+                                        updated = await schedule(
+                                            run["params"],
+                                            provider,
+                                            max_combinations=run["budget"][
+                                                "max_combinations"
+                                            ],
+                                            parent_plan=parent,
+                                            supplemental_candidates=meals["candidates"],
+                                        )
+                                        meal_ids = {
+                                            item["candidate_id"]
+                                            for item in meals["candidates"]
+                                        }
+                                        if any(
+                                            suggestion["status"]
+                                            in {"validated", "conditional"}
+                                            and any(
+                                                item.get("candidate_id") in meal_ids
+                                                and item.get("start_at")
+                                                and item.get("end_at")
+                                                for item in suggestion["payload"][
+                                                    "itinerary"
+                                                ]
+                                                if item.get("kind") == "activity"
+                                            )
+                                            for suggestion in updated
+                                        ):
+                                            output = updated
+                                        else:
+                                            output = deepcopy(initial["suggestions"])
+                                            meals["gaps"].append(
+                                                {
+                                                    "code": "meal_route_uncomputed",
+                                                    "message": "补餐候选未通过路线或时间窗校验，保留原安排和餐次缺口",
+                                                }
+                                            )
+                            except TimeoutError:
+                                meals["gaps"].append(
+                                    {
+                                        "code": "meal_lookup_timeout",
+                                        "message": "餐饮补查达到时间预算，保留已有路线与餐次缺口",
+                                    }
+                                )
+                        else:
+                            meals["gaps"].append(
+                                {
+                                    "code": "meal_lookup_budget",
+                                    "message": "剩余时间不足以补查餐饮，餐次缺口保持可见",
+                                }
+                            )
+                        for suggestion in output:
+                            inherited_meals = suggestion["payload"].get(
+                                "supplements", []
+                            )
+                            suggestion["payload"]["supplements"] = list(
+                                {
+                                    item["candidate_id"]: item
+                                    for item in [*inherited_meals, *meals["candidates"]]
+                                }.values()
+                            )
+                            suggestion["payload"]["unknowns"].extend(meals["gaps"])
+                            suggestion["payload"]["usage"]["meal_queries"] = meals[
+                                "queries"
+                            ]
+                            if meals["gaps"] and suggestion["status"] == "validated":
+                                suggestion["status"] = "conditional"
+                        frozen_usage = (await self.db("get_run", run["id"]))["usage"]
                         frozen_usage["cache_hits"] = provider.cache_hits
                         for suggestion in output:
                             suggestion["payload"]["usage"].update(frozen_usage)
@@ -146,12 +251,12 @@ class PlanningRunner:
                         plans = []
                         suggestions = current["checkpoint"]["routing"]
                         for index, suggestion in enumerate(suggestions):
-                            if not await self._db(
+                            if not await self.db(
                                 "run_is_current", run["id"], generation
                             ):
                                 return
                             payload = PlanPayload.model_validate(suggestion["payload"])
-                            plan = await self._db(
+                            plan = await self.db(
                                 "save_plan",
                                 run["trip_id"],
                                 SavePlan(
@@ -177,7 +282,7 @@ class PlanningRunner:
                                 for plan in plans
                             ),
                         }
-                    if not await self._db(
+                    if not await self.db(
                         "commit_planning_stage",
                         run["id"],
                         generation,
@@ -189,14 +294,14 @@ class PlanningRunner:
         except asyncio.CancelledError:
             if action_id is not None:
                 with suppress(Exception):
-                    await self._db("finish_action", action_id, status="unknown")
+                    await self.db("finish_action", action_id, status="unknown")
             raise
         except PlanningStopped:
             return
         except TimeoutError:
             if action_id is not None:
-                await self._db("finish_action", action_id, status="unknown")
-            await self._db(
+                await self.db("finish_action", action_id, status="unknown")
+            await self.db(
                 "stop_run",
                 run["id"],
                 generation,
@@ -207,8 +312,8 @@ class PlanningRunner:
         except Exception:
             if action_id is not None:
                 with suppress(Exception):
-                    await self._db("finish_action", action_id, status="unknown")
-            await self._db(
+                    await self.db("finish_action", action_id, status="unknown")
+            await self.db(
                 "stop_run",
                 run["id"],
                 generation,

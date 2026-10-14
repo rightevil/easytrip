@@ -22,6 +22,135 @@ def planning_hash(value):
 
 
 class PlanningStore:
+    def planning_replacements(self, trip_id):
+        from .database import NotFound
+
+        with self.connection() as connection:
+            trip = self._row(connection, trip_id)
+            current = self._planning_input(connection, trip_id)
+            cities = {
+                item["poi"]["city"].removesuffix("市") for item in current["selected"]
+            }
+            result = []
+            for row in connection.execute(
+                "SELECT candidate_id,payload_json FROM candidate_matches WHERE trip_id=? ORDER BY rowid DESC LIMIT 100",
+                (trip_id,),
+            ):
+                match = PoiMatch.model_validate_json(row["payload_json"])
+                if (
+                    row["candidate_id"] in current["selected_ids"]
+                    or match.status != "unique"
+                ):
+                    continue
+                if (
+                    not match.poi.city
+                    or match.poi.city.removesuffix("市") not in cities
+                ):
+                    continue
+                try:
+                    candidate, _ = self._candidate_for_places(
+                        connection, trip_id, row["candidate_id"]
+                    )
+                except NotFound:
+                    continue
+                if candidate["kind"] == "place":
+                    result.append(
+                        {
+                            "candidate_id": candidate["id"],
+                            "name": candidate["name"],
+                            "category": candidate["category"],
+                            "poi": match.poi.model_dump(mode="json"),
+                        }
+                    )
+            return {
+                "trip_id": trip_id,
+                "request_version": trip["request_version"],
+                "workspace_version": trip["workspace_version"],
+                "candidates": result,
+            }
+
+    def replace_planning_candidate(self, trip_id, body):
+        from .database import OperationConflict, encode
+
+        encoded = encode(body.model_dump(mode="json", exclude={"operation_id"}))
+        with self.connection(write=True) as connection:
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            receipt = connection.execute(
+                "SELECT payload_json FROM planning_replacements WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["payload_json"] != encoded:
+                    raise OperationConflict("替换操作ID已用于不同内容")
+                return {
+                    "trip": self._detail(connection, trip),
+                    "operation_applied": True,
+                }
+            self._version(trip, body.expected_version)
+            self._version(trip, body.expected_workspace_version, "workspace_version")
+            current = self._planning_input(connection, trip_id)
+            if current["input_hash"] != body.input_hash:
+                raise OperationConflict("规划输入已改变，请重新读取后替换")
+            request = TripRequest.model_validate_json(trip["request_json"])
+            for item in request.planning.activity_constraints:
+                if item.candidate_id == body.candidate_id and (
+                    item.required
+                    or item.locked
+                    or item.state == "completed"
+                    or item.fixed_start_at
+                ):
+                    raise OperationConflict("不能替换已完成、锁定、必去或固定预约项目")
+                if item.candidate_id == body.replacement_id and (
+                    item.excluded or item.state == "skipped"
+                ):
+                    raise OperationConflict("替换地点仍被排除或跳过，请先明确条件")
+            workspace = Workspace.model_validate_json(trip["workspace_json"])
+            if (
+                body.candidate_id not in workspace.selected_ids
+                or body.replacement_id in workspace.selected_ids
+            ):
+                raise OperationConflict("已选项目已改变，请重新读取")
+            previous = next(
+                (
+                    item
+                    for item in current["selected"]
+                    if item["candidate_id"] == body.candidate_id
+                ),
+                None,
+            )
+            candidate, _ = self._candidate_for_places(
+                connection, trip_id, body.replacement_id
+            )
+            row = connection.execute(
+                "SELECT payload_json FROM candidate_matches WHERE trip_id=? AND candidate_id=?",
+                (trip_id, body.replacement_id),
+            ).fetchone()
+            match = PoiMatch.model_validate_json(row[0]) if row else None
+            if (
+                not previous
+                or candidate["kind"] != "place"
+                or not match
+                or match.status != "unique"
+                or not match.poi.city
+                or match.poi.city.removesuffix("市")
+                != previous["poi"]["city"].removesuffix("市")
+            ):
+                raise OperationConflict("替换地点必须是本行程已唯一确认且同城的真实POI")
+            workspace.selected_ids = [
+                body.replacement_id if identifier == body.candidate_id else identifier
+                for identifier in workspace.selected_ids
+            ]
+            self._write_place_workspace(connection, trip_id, workspace)
+            connection.execute(
+                "INSERT INTO planning_replacements VALUES(?,?,?)",
+                (trip_id, str(body.operation_id), encoded),
+            )
+            return {
+                "trip": self._detail(connection, self._row(connection, trip_id)),
+                "operation_applied": True,
+            }
+
     def enqueue_planning(self, trip_id, body):
         from .database import OperationConflict, encode, now
 
@@ -225,6 +354,19 @@ class PlanningStore:
                     "evidence": evidence,
                 }
             )
+        if trip["active_plan_id"]:
+            adopted = self._plan(
+                self._plan_row(connection, trip_id, trip["active_plan_id"])
+            )
+            inherited_ids = {
+                item.candidate_id for item in request.planning.activity_constraints
+            }
+            for item in adopted["payload"].get("supplements", []):
+                if item["candidate_id"] in inherited_ids and item[
+                    "candidate_id"
+                ] not in {value["candidate_id"] for value in selected}:
+                    selected.append(item)
+                    cities.add(item["poi"]["city"].removesuffix("市"))
         if len(cities) > 1:
             gap("cross_city", "P4 只校验单城单日；跨城行程需要后续阶段")
         selected_ids = {item["candidate_id"] for item in selected}
@@ -396,7 +538,11 @@ class PlanningStore:
                     previous["input_hash"],
                 ) != (plan_id, body.expected_version, body.input_hash):
                     raise OperationConflict("采用操作ID已用于不同方案")
-                return {"trip": self._detail(connection, trip), "plan": plan, "operation_applied": True}
+                return {
+                    "trip": self._detail(connection, trip),
+                    "plan": plan,
+                    "operation_applied": True,
+                }
             self._version(trip, body.expected_version)
             current = self._planning_input(connection, trip_id)
             if (
@@ -419,8 +565,90 @@ class PlanningStore:
                 timezone.utc
             ):
                 raise OperationConflict("路线已过期，请重新校验后采用")
+            parent = (
+                self._plan(self._plan_row(connection, trip_id, plan["parent_plan_id"]))
+                if plan["parent_plan_id"]
+                else None
+            )
+            previous_items = parent["payload"]["itinerary"] if parent else []
+
+            def facts(item):
+                return {
+                    key: value
+                    for key, value in item.items()
+                    if key
+                    not in {
+                        "historical",
+                        "state",
+                        "locked",
+                        "required",
+                        "execution_unknown",
+                        "untravelled",
+                    }
+                }
+
+            historical = [
+                item for item in plan["payload"]["itinerary"] if item.get("historical")
+            ]
+            if historical and (
+                parent is None
+                or parent["id"] != trip["active_plan_id"]
+                or [facts(item) for item in historical]
+                != [facts(item) for item in previous_items[: len(historical)]]
+            ):
+                raise OperationConflict("历史前缀必须原样沿用当前采用方案")
+            activities = {
+                item.get("candidate_id"): item
+                for item in plan["payload"]["itinerary"]
+                if item.get("kind") == "activity"
+            }
+            previous_activities = {
+                item.get("candidate_id"): item
+                for item in previous_items
+                if item.get("kind") == "activity"
+            }
+            current_constraints = {
+                item["candidate_id"]: item
+                for item in current["request"]["planning"]["activity_constraints"]
+            }
+            active = (
+                self._plan(self._plan_row(connection, trip_id, trip["active_plan_id"]))
+                if trip["active_plan_id"]
+                else None
+            )
+            if active and any(
+                item.get("kind") == "activity"
+                and item.get("state") == "completed"
+                and current_constraints.get(item["candidate_id"], {}).get("state")
+                != "completed"
+                for item in active["payload"]["itinerary"]
+            ):
+                raise OperationConflict("不能移除或重置已经采用的完成事实")
+            for constraint in current["request"]["planning"]["activity_constraints"]:
+                if constraint["state"] != "completed" and not constraint["locked"]:
+                    continue
+                identifier = constraint["candidate_id"]
+                item, previous_item = (
+                    activities.get(identifier),
+                    previous_activities.get(identifier),
+                )
+                if (
+                    not parent
+                    or parent["id"] != trip["active_plan_id"]
+                    or item is None
+                    or previous_item is None
+                    or facts(item) != facts(previous_item)
+                    or (
+                        constraint["state"] == "completed"
+                        and item.get("state") != "completed"
+                    )
+                    or (constraint["locked"] and not item.get("locked"))
+                ):
+                    raise OperationConflict(
+                        "已完成或锁定项目必须保留当前方案的完整历史"
+                    )
             for item in plan["payload"]["itinerary"]:
-                if item.get("kind") == "route":
+                if item.get("kind") == "route" and not item.get("historical"):
                     leg = item.get("leg", {})
                     if (
                         leg.get("status") != "available"

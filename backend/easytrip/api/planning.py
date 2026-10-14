@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 
-from ..domain.planning import AdoptPlan
+from ..domain.planning import AdoptPlan, ReplacePlanningCandidate
 from .trips import _call
 
 
@@ -14,6 +14,14 @@ def make_router():
     @router.get("/{trip_id}/planning-input")
     def inputs(trip_id: str, request: Request):
         return _call(request, "planning_input", trip_id)
+
+    @router.get("/{trip_id}/planning-replacements")
+    def replacements(trip_id: str, request: Request):
+        return _call(request, "planning_replacements", trip_id)
+
+    @router.post("/{trip_id}/planning-replace")
+    def replace(trip_id: str, body: ReplacePlanningCandidate, request: Request):
+        return _call(request, "replace_planning_candidate", trip_id, body)
 
     @router.get("/{trip_id}/plans")
     def plans(trip_id: str, request: Request):

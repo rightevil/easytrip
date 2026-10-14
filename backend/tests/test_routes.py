@@ -118,7 +118,10 @@ def test_route_cache_preserves_real_facts_and_ignores_arbitrary_provider_fields(
             second = await provider.route(
                 "walking", ORIGIN, DESTINATION, "杭州市", DEPARTURE.replace(second=20)
             )
-            assert first == second
+            assert {
+                **first,
+                "departure_at": DEPARTURE.replace(second=20).isoformat(),
+            } == second
             assert len(requests) == 1
             assert first["status"] == "available"
             assert first["duration_seconds"] == 600
@@ -170,6 +173,49 @@ def test_cache_never_reuses_other_direction_mode_date_minute_or_city(database, c
                 city = "上海"
             await provider.route(mode, origin, destination, city, departure)
             assert len(amap.calls) == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["walking", "transit"])
+def test_same_api_minute_reuses_facts_but_binds_the_current_departure_input(
+    database, mode
+):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=district_payload()
+            if request.url.path == "/v3/config/district"
+            else transit_payload()
+            if mode == "transit"
+            else walking_payload(),
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = RouteProvider(Amap(client, "test-only"), database)
+            first = await provider.route(mode, ORIGIN, DESTINATION, "杭州", DEPARTURE)
+            calls = len(requests)
+            later = DEPARTURE.replace(second=29)
+            reused = await provider.route(mode, ORIGIN, DESTINATION, "杭州", later)
+            assert len(requests) == calls
+            assert datetime.fromisoformat(reused["departure_at"]) == later
+            assert {**reused, "departure_at": first["departure_at"]} == first
+            with database.connection() as connection:
+                saved = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM route_cache"
+                    ).fetchone()[0]
+                )
+            assert saved == first
+            next_minute = await provider.route(
+                mode, ORIGIN, DESTINATION, "杭州", later + timedelta(minutes=1)
+            )
+            assert len(requests) == calls + 1
+            assert next_minute["id"] != first["id"]
 
     asyncio.run(run())
 

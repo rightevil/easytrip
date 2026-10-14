@@ -120,7 +120,9 @@ class DiscoveryRunStore:
                 return False
             usage = json.loads(row["usage_json"])
             usage.update(updates)
-            DiscoveryUsage.model_validate(usage)
+            from ..domain.planning import PlanningUsage
+
+            (PlanningUsage if row["kind"] == "plan" else DiscoveryUsage).model_validate(usage)
             connection.execute("UPDATE runs SET usage_json=?,updated_at=? WHERE id=?", (encode(usage), now(), run_id))
             return True
 

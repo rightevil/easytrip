@@ -1,5 +1,6 @@
 import asyncio
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -113,6 +114,142 @@ def test_runs_real_normalizer_with_mock_transport_saves_and_adopts(database):
             ),
         )
         assert adopted["trip"]["active_plan_id"] == plan["id"]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_meal_failure_retains_routes_and_truthful_gap(database, monkeypatch, timeout):
+    async def exercise():
+        trip, _, pending = enqueue(database)
+        database.cancel_run(pending["id"], trip["id"], pending["generation"])
+        request = TripRequest.model_validate(trip["request"])
+        request.start_at += timedelta(hours=2)
+        trip_updated = database.update_trip(
+            trip["id"],
+            TripPatch(expected_version=trip["request_version"], request=request),
+        )
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=trip_updated["request_version"],
+                kind="plan",
+            ),
+        )
+        run = database.claim_run()
+        if timeout:
+
+            async def failed_lookup(*args):
+                raise TimeoutError()
+
+            monkeypatch.setattr(
+                "easytrip.agent.planning.supplement_meals", failed_lookup
+            )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+            await PlanningRunner(
+                database, Settings(amap_web_key="test-key"), client=client
+            ).execute(run)
+        result = database.get_run(run["id"])
+        assert result["status"] == "completed"
+        plans = database.list_plans(trip["id"])["items"]
+        assert plans and plans[0]["status"] == "conditional"
+        payload = plans[0]["payload"]
+        assert any(item["kind"] == "route" for item in payload["itinerary"])
+        assert payload["supplements"] == []
+        codes = {issue["code"] for issue in payload["unknowns"]}
+        assert "meal_gap" in codes
+        assert (
+            "meal_lookup_timeout" if timeout else "meal_supplement_unfilled"
+        ) in codes
+        assert result["usage"]["model_calls"] == result["usage"]["searches"] == 0
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("max_routes", [2, 40])
+def test_meal_candidate_is_revalidated_without_losing_initial_routes(
+    database, monkeypatch, max_routes
+):
+    async def lookup(runner, run, client, frozen, suggestions, amap):
+        await amap.search_candidates("模拟补查餐馆", "杭州")
+        meal = deepcopy(frozen["selected"][0])
+        meal.update(candidate_id="mock-meal", name="模拟补查餐馆", category="eat")
+        meal["poi"].update(
+            id="mock-meal-poi", name=meal["name"], location=[120.16, 30.25]
+        )
+        meal["meal_window"] = {
+            "period": "lunch",
+            "start_at": frozen["request"]["start_at"],
+            "end_at": (
+                datetime.fromisoformat(frozen["request"]["start_at"])
+                + timedelta(hours=3)
+            ).isoformat(),
+            "anchor_candidate_id": frozen["selected"][0]["candidate_id"],
+        }
+        meal["constraint"] = {
+            "candidate_id": "mock-meal",
+            "duration_minutes": 45,
+            "duration_source": "estimated",
+            "not_before": meal["meal_window"]["start_at"],
+            "not_after": meal["meal_window"]["end_at"],
+        }
+        return {"candidates": [meal], "queries": [], "gaps": []}
+
+    async def exercise():
+        trip, _, pending = enqueue(database)
+        database.cancel_run(pending["id"], trip["id"], pending["generation"])
+        request = TripRequest.model_validate(trip["request"])
+        request.start_at += timedelta(hours=2)
+        request.duration_minutes = 300
+        trip = database.update_trip(
+            trip["id"],
+            TripPatch(expected_version=trip["request_version"], request=request),
+        )
+        database.enqueue_run(
+            trip["id"],
+            CreateRun(
+                operation_id=uuid4(),
+                expected_version=trip["request_version"],
+                kind="plan",
+                budget={"max_routes": max_routes, "max_combinations": 1},
+            ),
+        )
+        run = database.claim_run()
+        monkeypatch.setattr("easytrip.agent.planning.supplement_meals", lookup)
+
+        def handler(request):
+            return (
+                httpx.Response(200, json={"status": "1", "count": "0", "pois": []})
+                if "/place/" in request.url.path
+                else response(request)
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await PlanningRunner(
+                database, Settings(amap_web_key="test-key"), client=client
+            ).execute(run)
+        saved = database.get_run(run["id"])
+        assert saved["status"] == "completed"
+        assert saved["usage"]["poi_calls"] == 1
+        payload = database.list_plans(trip["id"])["items"][0]["payload"]
+        assert any(item["kind"] == "route" for item in payload["itinerary"])
+        assert payload["supplements"][0]["candidate_id"] == "mock-meal"
+        if max_routes == 2:
+            assert {item["code"] for item in payload["unknowns"]} >= {
+                "meal_gap",
+                "meal_route_uncomputed",
+            }
+            assert not any(
+                item.get("candidate_id") == "mock-meal" for item in payload["itinerary"]
+            )
+        else:
+            assert any(
+                item.get("candidate_id") == "mock-meal"
+                and item.get("start_at")
+                and item.get("end_at")
+                for item in payload["itinerary"]
+            )
 
     asyncio.run(exercise())
 
@@ -256,6 +393,12 @@ def test_cached_resume_never_refetches_and_keeps_snapshot_usage(database):
             ).execute(run)
         second = database.get_run(next_run["id"])
         assert first["usage"]["amap_calls"] == 1 and second["usage"]["amap_calls"] == 0
-        assert second["usage"]["cache_hits"] == 1
+        assert second["usage"]["cache_hits"] == 0
+        assert (
+            database.list_plans(trip["id"])["items"][0]["payload"]["usage"][
+                "reused_route_count"
+            ]
+            == 1
+        )
 
     asyncio.run(exercise())

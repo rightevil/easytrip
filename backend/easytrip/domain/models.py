@@ -13,6 +13,30 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ConfirmedOrigin(Model):
+    name: Annotated[str, Field(min_length=1, max_length=300)]
+    location: list[Annotated[float, Field(strict=True, allow_inf_nan=False)]]
+    poi_id: Identifier | None = None
+    source: Literal["amap", "map"]
+    request_origin: Annotated[str, Field(max_length=200)] | None = None
+    city: Annotated[str, Field(max_length=200)] | None = None
+
+    @model_validator(mode="after")
+    def provenance(self):
+        if not self.name.strip() or (self.source == "amap") != (
+            self.poi_id is not None
+        ):
+            raise ValueError("起点名称和POI来源标识无效")
+        return self
+
+    @field_validator("location")
+    @classmethod
+    def valid_location(cls, value):
+        if len(value) != 2 or not -180 <= value[0] <= 180 or not -90 <= value[1] <= 90:
+            raise ValueError("起点必须是有效的经度、纬度")
+        return value
+
+
 class ActivityConstraint(Model):
     candidate_id: Identifier
     duration_minutes: Annotated[int, Field(strict=True, ge=1, le=1440)] | None = None
@@ -43,6 +67,8 @@ class ActivityConstraint(Model):
             raise ValueError("必去活动不能同时排除或跳过")
         if self.locked and (self.excluded or self.state == "skipped"):
             raise ValueError("锁定活动不能同时排除或跳过")
+        if self.fixed_start_at and (self.excluded or self.state == "skipped"):
+            raise ValueError("请先明确清除固定预约，再排除或跳过活动")
         if self.not_before and self.not_after and self.not_before >= self.not_after:
             raise ValueError("活动时间窗必须有正时长")
         for value, source in (
@@ -55,6 +81,11 @@ class ActivityConstraint(Model):
 
 
 class PlanningConstraints(Model):
+    progress_at: datetime | None = None
+    progress_origin: ConfirmedOrigin | None = None
+    dietary_restrictions: list[Annotated[str, Field(min_length=1, max_length=200)]] = (
+        Field(default_factory=list, max_length=20)
+    )
     origin_city: Annotated[str, Field(max_length=200)] | None = None
     timezone: Annotated[str, Field(min_length=1, max_length=100)] = "Asia/Shanghai"
     return_to_origin: bool = Field(default=False, strict=True)
@@ -80,7 +111,7 @@ class PlanningConstraints(Model):
             raise ValueError("规划时区必须是有效的 IANA 时区") from None
         return value
 
-    @field_validator("end_at")
+    @field_validator("end_at", "progress_at")
     @classmethod
     def aware_end(cls, value):
         if value is not None and value.utcoffset() is None:
@@ -89,6 +120,10 @@ class PlanningConstraints(Model):
 
     @model_validator(mode="after")
     def distinct_constraints(self):
+        if (self.progress_at is None) != (self.progress_origin is None):
+            raise ValueError("当前位置与当前时间必须成对明确提供")
+        if self.progress_origin and self.progress_origin.source != "map":
+            raise ValueError("当前位置只能使用用户明确提供的地图坐标")
         ids = [item.candidate_id for item in self.activity_constraints]
         if len(ids) != len(set(ids)) or len(self.disabled_modes) != len(
             set(self.disabled_modes)
@@ -143,30 +178,6 @@ class TripRequest(Model):
     def aware_datetime(cls, value):
         if value is not None and value.utcoffset() is None:
             raise ValueError("出发时间必须包含时区")
-        return value
-
-
-class ConfirmedOrigin(Model):
-    name: Annotated[str, Field(min_length=1, max_length=300)]
-    location: list[Annotated[float, Field(strict=True, allow_inf_nan=False)]]
-    poi_id: Identifier | None = None
-    source: Literal["amap", "map"]
-    request_origin: Annotated[str, Field(max_length=200)] | None = None
-    city: Annotated[str, Field(max_length=200)] | None = None
-
-    @model_validator(mode="after")
-    def provenance(self):
-        if not self.name.strip() or (self.source == "amap") != (
-            self.poi_id is not None
-        ):
-            raise ValueError("起点名称和POI来源标识无效")
-        return self
-
-    @field_validator("location")
-    @classmethod
-    def valid_location(cls, value):
-        if len(value) != 2 or not -180 <= value[0] <= 180 or not -90 <= value[1] <= 90:
-            raise ValueError("起点必须是有效的经度、纬度")
         return value
 
 
