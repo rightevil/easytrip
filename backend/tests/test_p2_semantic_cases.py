@@ -9,6 +9,75 @@ from easytrip.domain.evidence_metrics import object_dimension_judged
 from easytrip.services.evidence import build_candidates
 
 
+@pytest.mark.parametrize("kind", ["walk", "distance", "arrow", "overlapping_name"])
+def test_explicit_relations_cannot_inherit_one_endpoint_place_vote(kind):
+    sample, data = note(), extraction()
+    sample["text"] = "西湖、河坊街与杭州东。"
+    data["activities"] = []
+    data["mentions"][0]["quote"] = line_ref()
+    data["mentions"].extend(
+        {**data["mentions"][0], "id": identity, "name": name}
+        for identity, name in [("hefang", "河坊街"), ("station", "杭州东")]
+    )
+    texts = {
+        "walk": "我从西湖步行到河坊街，很舒服",
+        "arrow": "我去了西湖，沿西湖到河坊街徒步很舒服",
+        "overlapping_name": "我从西湖走到西湖宾馆，这条路线很舒服",
+        "distance": "哪个区域离杭州东比较近？",
+    }
+    objects = {
+        "walk": "西湖步行至河坊街",
+        "arrow": "西湖→河坊街",
+        "overlapping_name": "西湖到西湖宾馆的路线",
+        "distance": "各区域与杭州东的距离比较",
+    }
+    if kind == "overlapping_name":
+        sample["text"] += "西湖宾馆。"
+        data["mentions"].append(
+            {**data["mentions"][0], "id": "hotel", "name": "西湖宾馆"}
+        )
+    text = texts[kind]
+    sample["comments"][0]["text"] = text
+    data["evidence"][0].update(
+        object_text=objects[kind],
+        dimension="交通距离" if kind == "distance" else "步行体验",
+        quote=text,
+        mention_id="station" if kind == "distance" else "westlake",
+        link_status="linked",
+        nature="question" if kind == "distance" else "experience",
+        stance="question" if kind == "distance" else "positive",
+    )
+    result, calls = run([data], sample=sample)
+    item = result["data"]["evidence"][0]
+    assert len(calls) == 1 and object_dimension_judged(item)
+    assert item["link_status"] == "unlinked" and item["mention_id"] is None
+    assert item["quote"] == text
+    assert all(
+        candidate["stats"]["positive_count"]
+        == candidate["stats"]["negative_count"]
+        == 0
+        for candidate in build_candidates([result], sources())
+    )
+
+
+def test_nested_place_names_do_not_turn_a_single_place_into_a_relation():
+    sample, data = note(), extraction()
+    sample["text"] = "杭州西湖适合散步。"
+    sample["comments"][0]["text"] = "我去了杭州西湖，这次步行很好"
+    data["activities"] = []
+    data["mentions"][0].update(name="杭州西湖", quote=line_ref())
+    data["mentions"].append({**data["mentions"][0], "id": "short-name", "name": "西湖"})
+    data["evidence"][0].update(
+        object_text="杭州西湖步行",
+        dimension="步行体验",
+        stance="positive",
+        quote=sample["comments"][0]["text"],
+    )
+    result, _ = run([data], sample=sample)
+    item = result["data"]["evidence"][0]
+    assert item["link_status"] == "linked" and item["mention_id"] is not None
+
+
 @pytest.mark.parametrize(
     "text,judgements",
     [

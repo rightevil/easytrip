@@ -115,6 +115,16 @@ def _supports(quote, source):
     )
 
 
+def _literal_names(text, names):
+    found = set()
+    for name in sorted(names, key=lambda value: (-len(value), value)):
+        if name in text:
+            found.add(name)
+            # Mask aliases inside a longer name, keeping separate occurrences available.
+            text = text.replace(name, "\0" * len(name))
+    return found
+
+
 def validate_note_extraction(content, sources, comment_ids, submitted_images):
     raw = json.loads(content)
     if not isinstance(raw, dict):
@@ -348,6 +358,24 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
                     r"拍[得的](?:真|太|很|好|不错)|攻略写|写得|图片好", item.quote
                 ):
                     item.nature = "content_reaction"
+            names = {row.name for row in mentions.values()}
+            named_objects = _literal_names(item.object_text, names) & _literal_names(
+                item.quote, names
+            )
+            multiple_place_relation = len(named_objects) > 1 and re.search(
+                r"步行|徒步|路线|距离|比较|到|至|与|和|比|[→↔↦]|->",
+                item.object_text + item.quote,
+            )
+            region_distance = (
+                re.search(r"区域|片区|地区", item.object_text)
+                and re.search(r"区域|片区|地区", item.quote)
+                and re.search(r"距离|近|远", item.object_text + item.dimension)
+            )
+            # A quoted relationship supports its whole object, never a single endpoint's vote.
+            if item.link_status == "linked" and (
+                multiple_place_relation or region_distance
+            ):
+                item.mention_id, item.link_status = None, "unlinked"
             if item.mention_id is not None:
                 mention = mentions[item.mention_id]
                 if mention.name not in item.quote:
