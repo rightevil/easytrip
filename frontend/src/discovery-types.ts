@@ -71,7 +71,8 @@ export interface Candidate {
   kind: 'place' | 'direction' | 'generic';
   mention_ids: string[];
   evidence_ids: string[];
-  match_status: 'unmatched';
+  match_status: 'unique' | 'ambiguous' | 'unmatched';
+  ranking_reasons?: string[];
   summary: string;
   uncertainty: string[];
   stats: { author_count: number; positive_count: number; negative_count: number; uncertain_count: number };

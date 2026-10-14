@@ -18,6 +18,7 @@ beforeEach(() => {
   saved = new Map([['one', trip('one', '第一份行程')], ['two', trip('two', '第二份行程')]]);
   vi.spyOn(api, 'list').mockImplementation(async () => ({ items: [...saved.values()], total: saved.size, offset: 0, limit: 50 }));
   vi.spyOn(api, 'get').mockImplementation(async id => structuredClone(saved.get(id)!));
+  vi.spyOn(api, 'places').mockImplementation(async id => ({ trip: structuredClone(saved.get(id)!), run_id: null, request_version: saved.get(id)!.request_version, candidates: [], matches: [], points: [] }));
   vi.spyOn(api, 'update').mockImplementation(async (id, version, draft) => {
     const next = { ...saved.get(id)!, ...structuredClone(draft), request_version: version + 1 };
     saved.set(id, next); return structuredClone(next);

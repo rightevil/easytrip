@@ -36,6 +36,7 @@ from ..domain.tasks import (
 from .actions import ActionStore
 from .discovery import DiscoveryStore
 from .discovery_runs import DiscoveryRunStore
+from .places import PlaceStore
 
 
 class NotFound(Exception):
@@ -65,7 +66,7 @@ def encode(value):
     )
 
 
-class Database(DiscoveryStore, ActionStore, DiscoveryRunStore):
+class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -123,6 +124,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore):
             connection.execute("SELECT id,run_id,action_key FROM run_actions LIMIT 0")
             connection.execute("SELECT discovery_run_id FROM messages LIMIT 0")
             connection.execute("SELECT stage_started_at FROM runs LIMIT 0")
+            connection.execute("SELECT candidate_id,run_id,payload_json FROM candidate_matches LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):
@@ -246,6 +248,11 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore):
             row = self._row(connection, trip_id)
             self._editable(row)
             self._version(row, body.expected_version)
+            if body.request is not None and body.request.origin != TripRequest.model_validate_json(row["request_json"]).origin:
+                workspace = Workspace.model_validate_json(row["workspace_json"])
+                if workspace.confirmed_origin is not None:
+                    workspace.confirmed_origin = None
+                    self._write_place_workspace(connection, trip_id, workspace)
             connection.execute(
                 "UPDATE trips SET name=?, request_json=?, request_version=request_version+1, updated_at=? WHERE id=?",
                 (
@@ -264,9 +271,19 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore):
             row = self._row(connection, trip_id)
             self._editable(row)
             self._version(row, body.expected_version, "workspace_version")
+            previous = Workspace.model_validate_json(row["workspace_json"])
+            workspace = body.workspace.model_copy()
+            if previous.map_initialized or connection.execute("SELECT 1 FROM candidate_matches WHERE trip_id=? LIMIT 1", (trip_id,)).fetchone() is not None:
+                # Viewport autosave can resend old IDs; P3 membership changes only through places/map.
+                for field in ("selected_ids", "map_visible_ids"):
+                    setattr(workspace, field, getattr(previous, field))
+            for field in ("confirmed_origin", "map_initialized"):
+                if field in workspace.model_fields_set and getattr(workspace, field) != getattr(previous, field):
+                    raise OperationConflict("POI确认和地图初始化只能通过对应操作修改")
+                setattr(workspace, field, getattr(previous, field))
             connection.execute(
                 "UPDATE trips SET workspace_json=?, workspace_version=workspace_version+1, updated_at=? WHERE id=?",
-                (encode(body.workspace.model_dump(mode="json")), now(), trip_id),
+                (encode(workspace.model_dump(mode="json")), now(), trip_id),
             )
             return self._detail(connection, self._row(connection, trip_id))
 

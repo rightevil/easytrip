@@ -17,6 +17,9 @@ export interface Workspace {
   map_zoom: number;
   selected_ids: string[];
   map_visible_ids: string[];
+  map_initialized?: boolean;
+  map_city?: string | null;
+  confirmed_origin?: ConfirmedOrigin | null;
 }
 export interface Message {
   id: string;
@@ -92,7 +95,7 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     const detail = payload?.detail;
-    const message = typeof detail?.message === 'string' ? detail.message : '操作未完成，请重试。';
+    const message = typeof detail?.message === 'string' ? detail.message : typeof detail === 'string' ? detail : '操作未完成，请重试。';
     throw new ApiError(message, response.status, detail?.code ?? 'request_failed', detail?.current_version);
   }
   if (response.status === 204) return undefined as T;
@@ -105,8 +108,10 @@ export const api = {
   create: (operation_id: string) => call<Trip>('/trips', 'POST', { operation_id }),
   update: (id: string, expected_version: number, draft: { name: string; request: TripRequest }) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}`, 'PATCH', { expected_version, ...draft }),
-  workspace: (id: string, expected_version: number, workspace: Workspace) =>
-    call<Trip>(`/trips/${encodeURIComponent(id)}/workspace`, 'PATCH', { expected_version, workspace }),
+  workspace: (id: string, expected_version: number, workspace: Workspace) => {
+    const { map_initialized: _initialized, confirmed_origin: _origin, ...editable } = workspace;
+    return call<Trip>(`/trips/${encodeURIComponent(id)}/workspace`, 'PATCH', { expected_version, workspace: editable });
+  },
   message: (id: string, operation_id: string, content: string, discovery?: { expected_version: number; budget: DiscoveryBudget }) =>
     call<Message>(`/trips/${encodeURIComponent(id)}/messages`, 'POST', { operation_id, content, ...(discovery ? { start_discovery: true, ...discovery } : {}) }),
   archive: (id: string, expected_version: number, archived: boolean) =>
@@ -127,5 +132,19 @@ export const api = {
   gaps: (id: string, run_id: string) => call<{ items: Gap[] }>(`/trips/${encodeURIComponent(id)}/gaps?run_id=${encodeURIComponent(run_id)}`),
   adoptDirection: (id: string, candidate_id: string, run_id: string, operation_id: string, expected_version: number) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/directions/${encodeURIComponent(candidate_id)}/adopt`, 'POST', { run_id, operation_id, expected_version }),
+  places: (id: string, run_id?: string) => call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places${run_id ? `?run_id=${encodeURIComponent(run_id)}` : ''}`),
+  matchPlaces: (id: string, expected_version: number, expected_workspace_version: number, run_id: string) =>
+    call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/match`, 'POST', { expected_version, expected_workspace_version, run_id, refresh_map: false }),
+  confirmPlace: (id: string, candidate_id: string, expected_version: number, expected_workspace_version: number, poi_id: string) =>
+    call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/candidates/${encodeURIComponent(candidate_id)}/confirm`, 'POST', { expected_version, expected_workspace_version, poi_id }),
+  mapAction: (id: string, expected_version: number, expected_workspace_version: number, action: MapAction, options: { candidate_id?: string; category?: Workspace['category']; city?: string | null } = {}) => {
+    const { category, ...filters } = options;
+    return call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/map`, 'POST', { expected_version, expected_workspace_version, action, ...filters, ...(category && category !== 'all' ? { category } : {}) });
+  },
+  searchOrigin: (id: string, query: string, city: string, expected_version: number) =>
+    call<OriginSearch>(`/trips/${encodeURIComponent(id)}/places/origin/search?query=${encodeURIComponent(query)}&city=${encodeURIComponent(city)}&expected_version=${expected_version}`),
+  confirmOrigin: (id: string, expected_version: number, expected_workspace_version: number, confirmation: OriginConfirmation) =>
+    call<Trip>(`/trips/${encodeURIComponent(id)}/places/origin/confirm`, 'POST', { expected_version, expected_workspace_version, ...confirmation }),
 };
 import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
+import type { ConfirmedOrigin, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';

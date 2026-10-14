@@ -35,6 +35,7 @@ const sessions: TripSession[] = [];
 function session(value: Trip) { const created = new TripSession(value, () => {}); sessions.push(created); return created; }
 beforeEach(() => {
   vi.spyOn(api, 'candidates').mockResolvedValue(page());
+  vi.spyOn(api, 'places').mockImplementation(async (id, runId) => ({ trip: trip(id), run_id: runId ?? null, request_version: 1, candidates: [], matches: [], points: [] }));
   vi.spyOn(api, 'gaps').mockResolvedValue({ items: [] });
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };

@@ -3,6 +3,9 @@ import type { Message, Run, Trip, TripRequest, Workspace } from './api';
 import { Autosave } from './autosave';
 import { defaultDiscoveryBudget } from './discovery-types';
 import type { Candidate, DiscoveryBudget } from './discovery-types';
+import type { MapAction, OriginConfirmation, PlacesSnapshot } from './places-types';
+
+interface PlacesState { snapshot: PlacesSnapshot | null; busy: boolean; reading: boolean; error: string | null; focus: { candidate_id: string; sequence: number } | null }
 
 interface ChatState {
   messages: Message[];
@@ -31,6 +34,9 @@ export class TripSession {
   private tasks: RunState;
   private taskListeners = new Set<() => void>();
   private disposed = false;
+  private places: PlacesState = { snapshot: null, busy: false, reading: false, error: null, focus: null };
+  private placesListeners = new Set<() => void>();
+  private placesSequence = 0;
   constructor(trip: Trip, private onSaved: (trip: Trip) => void) {
     this.trip = trip;
     this.chat = { messages: trip.messages, content: '', sending: false, retryPending: false, error: null, discoveryRequested: false };
@@ -38,6 +44,11 @@ export class TripSession {
     this.request = new Autosave({ name: trip.name, request: trip.request }, trip.request_version, async (draft, version) => {
       const saved = await api.update(trip.id, version, draft);
       this.trip = { ...this.trip, name: saved.name, request: saved.request, request_version: saved.request_version, updated_at: saved.updated_at };
+      const workspaceState = this.workspace.getSnapshot();
+      if (!this.workspace.dirty && saved.workspace_version > workspaceState.version) {
+        this.workspace.resolve(saved.workspace, saved.workspace_version, false);
+        this.trip = { ...this.trip, workspace: saved.workspace, workspace_version: saved.workspace_version };
+      }
       onSaved(this.trip);
       return { value: { name: saved.name, request: saved.request }, version: saved.request_version };
     });
@@ -49,6 +60,65 @@ export class TripSession {
     });
   }
   get dirty() { return this.request.dirty || this.workspace.dirty; }
+  getPlacesSnapshot = () => this.places;
+  subscribePlaces = (listener: () => void) => { this.placesListeners.add(listener); return () => { this.placesListeners.delete(listener); }; };
+  private updatePlaces(change: Partial<PlacesState>) { this.places = { ...this.places, ...change }; this.placesListeners.forEach(listener => listener()); }
+  private async acceptPlaces(snapshot: PlacesSnapshot) {
+    if (snapshot.trip.id !== this.trip.id || snapshot.candidates.some(item => item.trip_id !== this.trip.id)) throw new Error('地点归属不一致，已阻止应用。');
+    const sequence = this.placesSequence;
+    if (this.workspace.getSnapshot().status === 'saving') {
+      try { await this.workspace.flush(); } catch { /* The authoritative snapshot can rebase pending viewport edits. */ }
+    }
+    if (sequence !== this.placesSequence || this.disposed) return;
+    const saved = snapshot.trip;
+    const local = this.workspace.getSnapshot();
+    if (saved.workspace_version >= local.version) {
+      const dirty = this.workspace.dirty;
+      this.workspace.resolve(saved.workspace, saved.workspace_version, false);
+      if (dirty) this.workspace.update({ ...saved.workspace, active_tab: local.value.active_tab, category: local.value.category, map_center: local.value.map_center, map_zoom: local.value.map_zoom, map_city: local.value.map_city });
+      this.trip = { ...this.trip, workspace: saved.workspace, workspace_version: saved.workspace_version, updated_at: saved.updated_at };
+    }
+    this.updatePlaces({ snapshot });
+    if (!this.disposed) this.onSaved(this.trip);
+  }
+  async readPlaces(runId?: string) {
+    if (this.places.busy) return;
+    const sequence = ++this.placesSequence;
+    this.updatePlaces({ reading: true, error: null });
+    try {
+      const snapshot = await api.places(this.trip.id, runId);
+      if (sequence === this.placesSequence && !this.disposed) await this.acceptPlaces(snapshot);
+    } catch (error) { if (sequence === this.placesSequence) this.updatePlaces({ error: error instanceof Error ? error.message : '地点读取失败。' }); }
+    finally { if (sequence === this.placesSequence) this.updatePlaces({ reading: false }); }
+  }
+  private async changePlaces(send: (version: number, workspaceVersion: number) => Promise<PlacesSnapshot>) {
+    if (this.places.busy) return false;
+    this.placesSequence++;
+    this.updatePlaces({ busy: true, error: null, reading: false });
+    try {
+      await this.flush();
+      await this.acceptPlaces(await send(this.request.getSnapshot().version, this.workspace.getSnapshot().version));
+      return true;
+    } catch (error) { this.updatePlaces({ error: error instanceof Error ? error.message : '地点操作未完成，请重新读取核对。' }); return false; }
+    finally { this.updatePlaces({ busy: false }); }
+  }
+  matchPlaces(runId: string) { return this.changePlaces((version, workspaceVersion) => api.matchPlaces(this.trip.id, version, workspaceVersion, runId)); }
+  confirmPlace(candidateId: string, poiId: string) { return this.changePlaces((version, workspaceVersion) => api.confirmPlace(this.trip.id, candidateId, version, workspaceVersion, poiId)); }
+  async mapAction(action: MapAction, candidateId?: string) {
+    const saved = await this.changePlaces((version, workspaceVersion) => api.mapAction(this.trip.id, version, workspaceVersion, action, { ...(candidateId ? { candidate_id: candidateId } : {}), ...(action === 'refresh' ? { category: this.workspace.getSnapshot().value.category, city: this.workspace.getSnapshot().value.map_city ?? null } : {}) }));
+    if (saved && candidateId && action === 'add') this.focusPlace(candidateId);
+    return saved;
+  }
+  focusPlace(candidateId: string) { this.updatePlaces({ focus: { candidate_id: candidateId, sequence: (this.places.focus?.sequence ?? 0) + 1 } }); }
+  async confirmOrigin(confirmation: OriginConfirmation) {
+    const success = await this.changePlaces(async (version, workspaceVersion) => {
+      const saved = await api.confirmOrigin(this.trip.id, version, workspaceVersion, confirmation);
+      if (saved.id !== this.trip.id) throw new Error('起点归属不一致，已阻止应用。');
+      return { ...(this.places.snapshot ?? { run_id: null, request_version: version, candidates: [], matches: [], points: [] }), trip: saved };
+    });
+    if (success) await this.readPlaces(this.places.snapshot?.run_id ?? undefined);
+    return success;
+  }
   get composer() { return this.chat.content; }
   getChatSnapshot = () => this.chat;
   subscribeChat = (listener: () => void) => {
@@ -188,5 +258,5 @@ export class TripSession {
     if (requestCurrent) this.request.resolve({ name: trip.name, request: trip.request }, trip.request_version, false);
     if (workspaceCurrent) this.workspace.resolve(trip.workspace, trip.workspace_version, false);
   }
-  dispose() { this.disposed = true; this.request.dispose(); this.workspace.dispose(); this.chatListeners.clear(); this.taskListeners.clear(); }
+  dispose() { this.disposed = true; this.request.dispose(); this.workspace.dispose(); this.chatListeners.clear(); this.taskListeners.clear(); this.placesListeners.clear(); }
 }

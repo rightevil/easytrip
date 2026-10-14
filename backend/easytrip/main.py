@@ -1,5 +1,6 @@
 """Local workspace and P0 map viewer; credentials stay on the backend."""
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from starlette.staticfiles import StaticFiles
 from .agent.discovery import DiscoveryRunner
 from .agent.runner import RunExecutor
 from .api.discovery import make_router as make_discovery_router
+from .api.places import make_router as make_places_router
 from .api.runs import make_router as make_runs_router
 from .api.trips import make_router as make_trips_router
 from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
@@ -48,9 +50,12 @@ def create_app(
     application.state.database = database
     application.state.settings = settings
     application.state.executor = executor
+    application.state.amap_lock = asyncio.Lock()
+    application.state.amap_last_call_monotonic = 0.0
     application.include_router(make_trips_router())
     application.include_router(make_runs_router())
     application.include_router(make_discovery_router())
+    application.include_router(make_places_router())
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )

@@ -53,6 +53,27 @@ class TripRequest(Model):
         return value
 
 
+class ConfirmedOrigin(Model):
+    name: Annotated[str, Field(min_length=1, max_length=300)]
+    location: list[Annotated[float, Field(strict=True, allow_inf_nan=False)]]
+    poi_id: Identifier | None = None
+    source: Literal["amap", "map"]
+    request_origin: Annotated[str, Field(max_length=200)] | None = None
+
+    @model_validator(mode="after")
+    def provenance(self):
+        if not self.name.strip() or (self.source == "amap") != (self.poi_id is not None):
+            raise ValueError("起点名称和POI来源标识无效")
+        return self
+
+    @field_validator("location")
+    @classmethod
+    def valid_location(cls, value):
+        if len(value) != 2 or not -180 <= value[0] <= 180 or not -90 <= value[1] <= 90:
+            raise ValueError("起点必须是有效的经度、纬度")
+        return value
+
+
 class Workspace(Model):
     active_tab: Literal["overview", "map", "plan"] = "overview"
     category: Literal["all", "eat", "play", "stay"] = "all"
@@ -68,6 +89,9 @@ class Workspace(Model):
     map_visible_ids: Annotated[list[Identifier], Field(max_length=100)] = Field(
         default_factory=list
     )
+    map_initialized: bool = Field(default=False, strict=True)
+    map_city: Annotated[str, Field(max_length=200)] | None = None
+    confirmed_origin: ConfirmedOrigin | None = None
 
     @field_validator("map_center")
     @classmethod
