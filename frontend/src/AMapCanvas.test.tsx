@@ -19,11 +19,16 @@ class FakeMap {
   getZoom = () => 12;
   constructor() { instance = this; }
 }
+class FakePolyline {
+  setPath = vi.fn();
+  constructor(readonly options: { path: [number, number][]; strokeColor: string }) { lines.push(this); }
+}
 let instance: FakeMap;
 let created: FakeMarker[];
+let lines: FakePolyline[];
 const point = (id: string): MapPoint => ({ id, name: id, location: [120.1, 30.2] });
 const defaults = () => ({ center: null, zoom: 12, focus: null, picking: false, onSelect: vi.fn(), onViewport: vi.fn(), onPick: vi.fn() });
-beforeEach(() => { created = []; vi.mocked(loadAMap).mockResolvedValue({ Map: FakeMap, Marker: FakeMarker } as unknown as AMapSDK); });
+beforeEach(() => { created = []; lines = []; vi.mocked(loadAMap).mockResolvedValue({ Map: FakeMap, Marker: FakeMarker, Polyline: FakePolyline } as unknown as AMapSDK); });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 async function ready() { await act(async () => { await Promise.resolve(); }); act(() => instance.handlers.get('complete')?.({})); }
 
@@ -64,5 +69,20 @@ describe('real SDK canvas', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('地图配置未就绪');
     expect(screen.getByText('地图配置未就绪')).toBeTruthy();
     expect(created).toHaveLength(0);
+  });
+  it('draws only independent provider paths and removes the previous plan without rebuilding P3 markers', async () => {
+    const props = defaults();
+    const first = { id: 'leg-one', mode: 'transit', geometry: [[[120, 30], [120.01, 30]], [[120.05, 30], [120.08, 30]]] as [number, number][][] };
+    const view = render(<AMapCanvas {...props} points={[point('poi')]} routes={[first]} />); await ready();
+    expect(lines).toHaveLength(2);
+    expect(lines.map(line => line.options.path)).toEqual(first.geometry);
+    expect(lines[0].options.strokeColor).toBe('#4269a4');
+    const oldLines = [...lines];
+    view.rerender(<AMapCanvas {...props} points={[point('poi')]} routes={[{ id: 'leg-two', mode: 'walking', geometry: [[[120.1, 30], [120.2, 30]], [[NaN, 30], [120.2, 30]], [[120.3, 30]]] }]} />);
+    expect(lines).toHaveLength(3);
+    expect(lines[2].options.path).toEqual([[120.1, 30], [120.2, 30]]);
+    oldLines.forEach(line => expect(instance.remove).toHaveBeenCalledWith(line));
+    expect(created).toHaveLength(1);
+    expect(instance.remove).not.toHaveBeenCalledWith(created[0]);
   });
 });

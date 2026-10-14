@@ -4,6 +4,8 @@ import { Autosave } from './autosave';
 import { defaultDiscoveryBudget } from './discovery-types';
 import type { Candidate, DiscoveryBudget } from './discovery-types';
 import type { MapAction, OriginConfirmation, PlacesSnapshot } from './places-types';
+import { defaultPlanningBudget } from './planning-types';
+import type { Plan, PlanningBudget } from './planning-types';
 
 interface PlacesState { snapshot: PlacesSnapshot | null; busy: boolean; reading: boolean; error: string | null; focus: { candidate_id: string; sequence: number } | null }
 
@@ -18,7 +20,8 @@ interface ChatState {
 interface RunState {
   runs: Run[];
   busy: boolean;
-  operation: { id: string; version: number; kind: 'prepare_workspace' | 'discover'; budget?: DiscoveryBudget; parentRunId?: string } | null;
+  operation: { id: string; version: number; kind: 'prepare_workspace' | 'discover' | 'plan'; budget?: DiscoveryBudget; planningBudget?: PlanningBudget; parentRunId?: string; parentPlanId?: string } | null;
+  planAdoption: { planId: string; id: string; version: number; inputHash: string } | null;
   error: string | null;
   discoveryBudget: DiscoveryBudget;
 }
@@ -40,7 +43,7 @@ export class TripSession {
   constructor(trip: Trip, private onSaved: (trip: Trip) => void) {
     this.trip = trip;
     this.chat = { messages: trip.messages, content: '', sending: false, retryPending: false, error: null, discoveryRequested: false };
-    this.tasks = { runs: trip.runs, busy: false, operation: null, error: null, discoveryBudget: { ...defaultDiscoveryBudget } };
+    this.tasks = { runs: trip.runs, busy: false, operation: null, planAdoption: null, error: null, discoveryBudget: { ...defaultDiscoveryBudget } };
     this.request = new Autosave({ name: trip.name, request: trip.request }, trip.request_version, async (draft, version) => {
       const saved = await api.update(trip.id, version, draft);
       this.trip = { ...this.trip, name: saved.name, request: saved.request, request_version: saved.request_version, updated_at: saved.updated_at };
@@ -183,7 +186,7 @@ export class TripSession {
     this.updateTasks({ busy: true, error: null });
     try {
       await this.flush();
-      if (this.tasks.operation?.kind === 'discover') throw new Error('请先处理发现任务的重试，或放弃该次重试。');
+      if (this.tasks.operation && this.tasks.operation.kind !== 'prepare_workspace') throw new Error('请先处理其他任务的重试，或明确放弃该次重试。');
       const operation = this.tasks.operation ?? { id: crypto.randomUUID(), version: this.request.getSnapshot().version, kind: 'prepare_workspace' as const };
       this.updateTasks({ operation });
       this.acceptRun(await api.startRun(this.trip.id, operation.id, operation.version));
@@ -197,7 +200,7 @@ export class TripSession {
     this.updateTasks({ busy: true, error: null });
     try {
       await this.flush();
-      if (this.tasks.operation?.kind === 'prepare_workspace') throw new Error('请先处理工作区准备的重试，或放弃该次重试。');
+      if (this.tasks.operation && this.tasks.operation.kind !== 'discover') throw new Error('请先处理其他任务的重试，或明确放弃该次重试。');
       const operation = this.tasks.operation ?? { id: crypto.randomUUID(), version: this.request.getSnapshot().version, kind: 'discover' as const, budget: structuredClone(this.tasks.discoveryBudget), parentRunId };
       this.updateTasks({ operation });
       this.acceptRun(await api.startDiscovery(this.trip.id, operation.id, operation.version, operation.budget!, operation.parentRunId));
@@ -205,6 +208,60 @@ export class TripSession {
     } catch (error) {
       this.updateTasks({ error: error instanceof Error ? error.message : '发现任务尚未提交，请重试。' });
     } finally { this.updateTasks({ busy: false }); }
+  }
+  async startPlanning(parentPlanId?: string) {
+    if (this.tasks.busy || this.chat.sending) return;
+    this.updateTasks({ busy: true, error: null });
+    try {
+      await this.flush();
+      if (this.tasks.operation && this.tasks.operation.kind !== 'plan') throw new Error('请先处理其他任务的重试，或明确放弃该次重试。');
+      const operation = this.tasks.operation ?? { id: crypto.randomUUID(), version: this.request.getSnapshot().version, kind: 'plan' as const, planningBudget: { ...defaultPlanningBudget }, parentPlanId };
+      this.updateTasks({ operation });
+      const run = await api.startPlanning(this.trip.id, operation.id, operation.version, operation.planningBudget!, operation.parentPlanId);
+      if (run.trip_id !== this.trip.id || run.kind !== 'plan') throw new Error('规划任务归属不一致，已阻止应用。');
+      this.acceptRun(run);
+      this.updateTasks({ operation: null });
+      return true;
+    } catch (error) {
+      this.updateTasks({ error: error instanceof Error ? error.message : '规划任务尚未提交，请重试。' });
+      return false;
+    } finally { this.updateTasks({ busy: false }); }
+  }
+  async adoptPlan(plan: Plan) {
+    if (this.tasks.busy) return false;
+    this.updateTasks({ busy: true, error: null });
+    try {
+      await this.flush();
+      if (plan.trip_id !== this.trip.id) throw new Error('方案不属于当前行程。');
+      if (this.tasks.planAdoption && this.tasks.planAdoption.planId !== plan.id) throw new Error('请先处理上一份方案的采用重试。');
+      let operation = this.tasks.planAdoption;
+      if (!operation) {
+        const input = await api.planningInput(this.trip.id);
+        if (input.trip_id && input.trip_id !== this.trip.id || input.request_version !== this.request.getSnapshot().version || input.input_hash !== plan.input_hash || this.request.dirty || this.workspace.dirty) throw new Error('规划条件或所选地点已变化，请重新生成方案。');
+        operation = { planId: plan.id, id: crypto.randomUUID(), version: input.request_version, inputHash: input.input_hash };
+        this.updateTasks({ planAdoption: operation });
+      }
+      const { trip: saved, plan: adopted, operation_applied } = await api.adoptPlan(this.trip.id, plan.id, operation.id, operation.version, operation.inputHash);
+      if (saved.id !== this.trip.id || adopted.trip_id !== this.trip.id || adopted.id !== plan.id || saved.active_plan_id !== plan.id && operation_applied !== true) throw new Error('采用结果未确认，已阻止应用。');
+      const request = this.request.getSnapshot();
+      const workspace = this.workspace.getSnapshot();
+      const requestCurrent = saved.request_version >= request.version && !this.request.dirty && request.status !== 'saving';
+      const workspaceCurrent = saved.workspace_version >= workspace.version && !this.workspace.dirty && workspace.status !== 'saving';
+      this.trip = { ...this.trip, active_plan_id: saved.active_plan_id, updated_at: saved.updated_at,
+        ...(requestCurrent ? { name: saved.name, request: saved.request, request_version: saved.request_version } : {}),
+        ...(workspaceCurrent ? { workspace: saved.workspace, workspace_version: saved.workspace_version } : {}) };
+      if (requestCurrent) this.request.resolve({ name: saved.name, request: saved.request }, saved.request_version, false);
+      if (workspaceCurrent) this.workspace.resolve(saved.workspace, saved.workspace_version, false);
+      this.updateTasks({ planAdoption: null });
+      if (!this.disposed) this.onSaved(this.trip);
+      return true;
+    } catch (error) {
+      this.updateTasks({ error: error instanceof Error ? error.message : '方案采用未完成，请重试。' });
+      return false;
+    } finally { this.updateTasks({ busy: false }); }
+  }
+  forgetPlanAdoption() {
+    if (!this.tasks.busy) this.updateTasks({ planAdoption: null, error: null });
   }
   async adoptDirection(candidate: Candidate) {
     if (this.tasks.busy) return;
@@ -251,7 +308,8 @@ export class TripSession {
     const messages = [...trip.messages, ...this.chat.messages.filter(saved => !trip.messages.some(item => item.id === saved.id))].sort((a, b) => a.created_at.localeCompare(b.created_at));
     const requestCurrent = trip.request_version >= this.request.getSnapshot().version;
     const workspaceCurrent = trip.workspace_version >= this.workspace.getSnapshot().version;
-    this.trip = { ...trip, messages, ...(!requestCurrent ? { name: this.trip.name, request: this.trip.request, request_version: this.trip.request_version } : {}), ...(!workspaceCurrent ? { workspace: this.trip.workspace, workspace_version: this.trip.workspace_version } : {}) };
+    const planCurrent = trip.updated_at >= this.trip.updated_at;
+    this.trip = { ...trip, messages, ...(!requestCurrent ? { name: this.trip.name, request: this.trip.request, request_version: this.trip.request_version } : {}), ...(!workspaceCurrent ? { workspace: this.trip.workspace, workspace_version: this.trip.workspace_version } : {}), ...(!planCurrent ? { active_plan_id: this.trip.active_plan_id, updated_at: this.trip.updated_at } : {}) };
     this.updateChat({ messages });
     trip.runs.forEach(run => this.acceptRun(run));
     this.trip = { ...this.trip, runs: this.tasks.runs };

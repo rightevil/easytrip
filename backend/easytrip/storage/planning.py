@@ -8,7 +8,7 @@ from uuid import uuid4
 from ..domain.discovery import Activity, Evidence
 from ..domain.models import TripRequest, Workspace
 from ..domain.places import PoiMatch
-from ..domain.planning import SavePlan
+from ..domain.planning import PLAN_STAGES, PlanningCheckpoint, PlanningUsage, SavePlan
 
 
 def planning_hash(value):
@@ -22,6 +22,102 @@ def planning_hash(value):
 
 
 class PlanningStore:
+    def enqueue_planning(self, trip_id, body):
+        from .database import OperationConflict, encode, now
+
+        operation = body.model_dump(
+            mode="json", exclude={"operation_id"}, exclude_none=True
+        )
+        with self.connection(write=True) as connection:
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            previous = connection.execute(
+                "SELECT * FROM runs WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            if previous is not None:
+                if json.loads(previous["params_json"])["operation"] != operation:
+                    raise OperationConflict("操作ID已用于不同的规划任务")
+                return self._run(previous)
+            self._version(trip, body.expected_version)
+            value = self._planning_input(connection, trip_id)
+            if body.parent_plan_id:
+                self._plan_row(connection, trip_id, str(body.parent_plan_id))
+            value.update(
+                operation=operation,
+                parent_plan_id=str(body.parent_plan_id)
+                if body.parent_plan_id
+                else None,
+            )
+            identifier, timestamp = str(uuid4()), now()
+            connection.execute(
+                "INSERT INTO runs(id,trip_id,operation_id,request_version,kind,status,stage,params_json,budget_json,checkpoint_json,usage_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    identifier,
+                    trip_id,
+                    str(body.operation_id),
+                    body.expected_version,
+                    "plan",
+                    "pending",
+                    PLAN_STAGES[0],
+                    encode(value),
+                    encode(body.budget.model_dump(mode="json")),
+                    encode(PlanningCheckpoint().model_dump(mode="json")),
+                    encode(PlanningUsage().model_dump(mode="json")),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return self._run(self._run_row(connection, identifier))
+
+    def commit_planning_stage(self, run_id, generation, stage, output, elapsed_seconds):
+        from .database import OperationConflict, encode, now
+
+        with self.connection(write=True) as connection:
+            row = self._run_row(connection, run_id)
+            if not self._run_current(connection, row, generation):
+                return False
+            checkpoint = json.loads(row["checkpoint_json"])
+            completed = checkpoint["completed_stages"]
+            if (
+                stage != row["stage"]
+                or completed != list(PLAN_STAGES[: len(completed)])
+                or stage != PLAN_STAGES[len(completed)]
+            ):
+                raise OperationConflict("规划阶段已更新")
+            checkpoint[stage] = output
+            completed.append(stage)
+            PlanningCheckpoint.model_validate(checkpoint)
+            usage = json.loads(row["usage_json"])
+            if stage == "routing":
+                usage["cache_hits"] = max(
+                    (item["payload"]["usage"].get("cache_hits", 0) for item in output),
+                    default=0,
+                )
+            usage["steps"] += 1
+            usage["elapsed_seconds"] += elapsed_seconds
+            done = len(completed) == len(PLAN_STAGES)
+            status = (
+                ("partial" if output.get("partial") else "completed")
+                if done
+                else "running"
+            )
+            connection.execute(
+                "UPDATE runs SET checkpoint_json=?,usage_json=?,status=?,stage=?,result_json=?,stop_reason=?,stage_started_at=?,updated_at=? WHERE id=?",
+                (
+                    encode(checkpoint),
+                    encode(usage),
+                    status,
+                    "done" if done else PLAN_STAGES[len(completed)],
+                    encode(output) if done else row["result_json"],
+                    "planning_partial" if status == "partial" else None,
+                    None if done else now(),
+                    now(),
+                    run_id,
+                ),
+            )
+            return True
+
     def _planning_input(self, connection, trip_id):
         from .database import NotFound
 
@@ -288,8 +384,20 @@ class PlanningStore:
         with self.connection(write=True) as connection:
             trip = self._row(connection, trip_id)
             self._editable(trip)
-            self._version(trip, body.expected_version)
             plan = self._plan(self._plan_row(connection, trip_id, plan_id))
+            previous = connection.execute(
+                "SELECT * FROM plan_adoptions WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            if previous is not None:
+                if (
+                    previous["plan_id"],
+                    previous["request_version"],
+                    previous["input_hash"],
+                ) != (plan_id, body.expected_version, body.input_hash):
+                    raise OperationConflict("采用操作ID已用于不同方案")
+                return {"trip": self._detail(connection, trip), "plan": plan, "operation_applied": True}
+            self._version(trip, body.expected_version)
             current = self._planning_input(connection, trip_id)
             if (
                 plan["request_version"] != body.expected_version
@@ -311,6 +419,18 @@ class PlanningStore:
                 timezone.utc
             ):
                 raise OperationConflict("路线已过期，请重新校验后采用")
+            for item in plan["payload"]["itinerary"]:
+                if item.get("kind") == "route":
+                    leg = item.get("leg", {})
+                    if (
+                        leg.get("status") != "available"
+                        or not leg.get("valid_until")
+                        or datetime.fromisoformat(leg["valid_until"])
+                        <= datetime.now(timezone.utc)
+                    ):
+                        raise OperationConflict(
+                            "交通段未取得有效路线或已经过期，请重新校验"
+                        )
             if (
                 current["request"]["planning"]["activity_constraints"]
                 and any(
@@ -349,4 +469,5 @@ class PlanningStore:
             return {
                 "trip": self._detail(connection, self._row(connection, trip_id)),
                 "plan": plan,
+                "operation_applied": True,
             }

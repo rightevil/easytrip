@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { api } from './api';
 import type { Workspace } from './api';
+import { defaultPlanningBudget } from './planning-types';
 
 afterEach(() => vi.unstubAllGlobals());
 it('omits the UI all-category sentinel and server-owned map confirmation fields at the API boundary', async () => {
@@ -14,4 +15,14 @@ it('omits the UI all-category sentinel and server-owned map confirmation fields 
   expect(body.workspace).not.toHaveProperty('map_initialized');
   expect(body.workspace).not.toHaveProperty('confirmed_origin');
   expect(body.workspace.map_visible_ids).toEqual([]);
+});
+
+it('starts bounded planning and adopts only a named server plan with its input signature', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.startPlanning('trip / one', 'operation', 7, defaultPlanningBudget, 'parent');
+  expect(send.mock.calls[0][0]).toBe('/api/trips/trip%20%2F%20one/runs');
+  expect(JSON.parse(send.mock.calls[0][1].body)).toEqual({ kind: 'plan', operation_id: 'operation', expected_version: 7, budget: defaultPlanningBudget, parent_plan_id: 'parent' });
+  await api.adoptPlan('one', 'plan-one', 'adopt-operation', 7, 'a'.repeat(64));
+  expect(JSON.parse(send.mock.calls[1][1].body)).toEqual({ operation_id: 'adopt-operation', expected_version: 7, input_hash: 'a'.repeat(64) });
 });

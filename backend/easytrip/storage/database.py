@@ -24,6 +24,12 @@ from ..domain.models import (
     Workspace,
     WorkspacePatch,
 )
+from ..domain.planning import (
+    PLAN_STAGES,
+    PlanningBudget,
+    PlanningCheckpoint,
+    PlanningUsage,
+)
 from ..domain.tasks import (
     STAGE_MODELS,
     STAGES,
@@ -38,6 +44,7 @@ from .discovery import DiscoveryStore
 from .discovery_runs import DiscoveryRunStore
 from .places import PlaceStore
 from .planning import PlanningStore
+from .routes import RouteStore
 
 
 class NotFound(Exception):
@@ -67,7 +74,7 @@ def encode(value):
     )
 
 
-class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, PlanningStore):
+class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, PlanningStore, RouteStore):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -345,6 +352,8 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
                 (now(), trip_id),
             )
             connection.execute("DELETE FROM trips WHERE id=?", (trip_id,))
+            # Route cache may contain a private origin; other trips keep their frozen plans.
+            connection.execute("DELETE FROM route_cache")
 
     @staticmethod
     def _run_row(connection, run_id, trip_id=None):
@@ -357,6 +366,8 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
         body = CreateRun.model_validate(body)
         if body.kind == "discover":
             return self.enqueue_discovery(trip_id, body)
+        if body.kind == "plan":
+            return self.enqueue_planning(trip_id, body)
         operation = body.model_dump(mode="json", exclude={"operation_id"}, exclude_none=True)
         with self.connection(write=True) as connection:
             trip = self._row(connection, trip_id)
@@ -442,6 +453,14 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
                         if usage.steps != len(checkpoint.completed_stages):
                             raise ValueError("无效准备任务步骤")
                         stages = STAGES
+                    elif row["kind"] == "plan":
+                        PlanningBudget.model_validate(run["budget"])
+                        checkpoint = PlanningCheckpoint.model_validate(run["checkpoint"])
+                        PlanningUsage.model_validate(run["usage"])
+                        if run["params"]["input_hash"] != self._planning_input(connection, row["trip_id"])["input_hash"]:
+                            connection.execute("UPDATE runs SET status='stale',stop_reason='planning_input_changed',updated_at=? WHERE id=?", (now(), row['id']))
+                            continue
+                        stages = PLAN_STAGES
                     else:
                         raise ValueError("无效任务类型")
                     if row["stage"] != stages[len(checkpoint.completed_stages)]:
@@ -471,9 +490,10 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
         if row["status"] != "running" or row["generation"] != generation:
             return False
         trip = self._row(connection, row["trip_id"])
-        if trip["status"] == "archived" or trip["request_version"] != row["request_version"]:
+        input_changed = row["kind"] == "plan" and json.loads(row["params_json"])["input_hash"] != self._planning_input(connection, row["trip_id"])["input_hash"]
+        if trip["status"] == "archived" or trip["request_version"] != row["request_version"] or input_changed:
             status = "cancelled" if trip["status"] == "archived" else "stale"
-            reason = "trip_archived" if status == "cancelled" else "request_changed"
+            reason = "trip_archived" if status == "cancelled" else "planning_input_changed" if input_changed else "request_changed"
             connection.execute(
                 "UPDATE runs SET status=?,generation=generation+1,stop_reason=?,usage_json=?,stage_started_at=NULL,updated_at=? WHERE id=?",
                 (status, reason, encode(self._interrupt_actions(connection, row["id"], self._elapsed_usage(row))), now(), row["id"]),
@@ -567,7 +587,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
             if row["error_code"] == "invalid_run_data":
                 raise OperationConflict("任务数据不完整，请新建准备任务")
             usage, budget = json.loads(row["usage_json"]), json.loads(row["budget_json"])
-            stages = DISCOVERY_STAGES if row["kind"] == "discover" else STAGES
+            stages = DISCOVERY_STAGES if row["kind"] == "discover" else PLAN_STAGES if row["kind"] == "plan" else STAGES
             if len(json.loads(row["checkpoint_json"])["completed_stages"]) == len(stages):
                 raise OperationConflict("本轮已结束，请新建任务继续")
             if row["stop_reason"] in ("step_budget_exhausted", "time_budget_exhausted") or usage["steps"] >= budget["max_steps"] or usage["elapsed_seconds"] >= budget["max_seconds"]:
@@ -578,6 +598,11 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
                 >= budget["max_tokens"]
             ):
                 raise OperationConflict("本轮模型预算已耗尽，请新建任务")
+            if row["kind"] == "plan":
+                if usage.get("amap_calls", 0) >= budget["max_routes"] or usage.get("unknown_result_calls", 0):
+                    raise OperationConflict("本轮路线额度已耗尽或有未知请求；请新建任务，勿重放")
+                if json.loads(row["params_json"])["input_hash"] != self._planning_input(connection, trip_id)["input_hash"]:
+                    raise OperationConflict("规划起点或已选项目已改变，请新建任务")
             connection.execute(
                 "UPDATE runs SET status='pending',generation=generation+1,error_code=NULL,stop_reason=NULL,updated_at=? WHERE id=?",
                 (now(), run_id),

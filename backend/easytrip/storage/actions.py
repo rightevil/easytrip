@@ -57,7 +57,7 @@ class ActionStore:
             raise ValueError("模型输出token预算应为1到65536的整数")
         with self.connection(write=True) as connection:
             row = self._run_row(connection, run_id)
-            if row["kind"] != "discover":
+            if row["kind"] not in {"discover", "plan"}:
                 return None
             if not self._run_current(connection, row, generation):
                 return None
@@ -69,6 +69,10 @@ class ActionStore:
                 raise OperationConflict("调用已记录，读取检查点后决定是否继续")
             budget = json.loads(row["budget_json"])
             usage = json.loads(row["usage_json"])
+            if row["kind"] == "plan" and params.get("service") == "amap":
+                if usage.get("amap_calls", 0) >= budget["max_routes"] or usage.get("unknown_result_calls", 0):
+                    return None
+                usage["amap_calls"] = usage.get("amap_calls", 0) + 1
             if self._elapsed_usage(row)["elapsed_seconds"] >= budget["max_seconds"]:
                 return None
             # Prompt token usage is reported afterwards; overshoot stops further calls.
@@ -181,6 +185,9 @@ class ActionStore:
             )
             run = self._run_row(connection, row["run_id"])
             total = json.loads(run["usage_json"])
+            if updated_usage.get("amap_kind") in {"route", "city"} and not previous_usage.get("amap_kind"):
+                counter = "route_calls" if updated_usage["amap_kind"] == "route" else "city_calls"
+                total[counter] = total.get(counter, 0) + 1
             total["unknown_result_calls"] = max(
                 0,
                 total.get("unknown_result_calls", 0)

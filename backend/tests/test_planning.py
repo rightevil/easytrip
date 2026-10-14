@@ -190,7 +190,7 @@ def test_adopt_checks_version_inputs_expiry_and_duplicate_id(database):
     assert database.adopt_plan(trip["id"], plan["id"], body) == first
     with pytest.raises(VersionConflict):
         database.adopt_plan(
-            trip["id"], plan["id"], body.model_copy(update={"expected_version": 1})
+            trip["id"], plan["id"], body.model_copy(update={"expected_version": 1, "operation_id": uuid4()})
         )
     expired, _ = saved_plan(
         database,
@@ -217,7 +217,8 @@ def test_adopt_checks_version_inputs_expiry_and_duplicate_id(database):
         ),
     )
     with pytest.raises(OperationConflict):
-        database.adopt_plan(trip["id"], plan["id"], body)
+        database.adopt_plan(trip["id"], plan["id"], body.model_copy(update={"operation_id": uuid4()}))
+    assert database.adopt_plan(trip["id"], plan["id"], body)["plan"] == plan
 
 
 def test_no_client_endpoint_can_forge_validated_route(database):

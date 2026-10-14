@@ -12,8 +12,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
 from .agent.discovery import DiscoveryRunner
+from .agent.planning import PlanningRunner
 from .agent.runner import RunExecutor
 from .api.discovery import make_router as make_discovery_router
+from .api.places import _before_amap_request
 from .api.places import make_router as make_places_router
 from .api.planning import make_router as make_planning_router
 from .api.runs import make_router as make_runs_router
@@ -41,6 +43,9 @@ def create_app(
         database.initialize()
         async with direct_client() as client:
             application.state.http = client
+            async def planning_gate():
+                await _before_amap_request(application)
+            executor.planning = PlanningRunner(database, settings, client=client, before_request=planning_gate)
             await executor.start()
             try:
                 yield

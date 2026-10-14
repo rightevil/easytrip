@@ -5,10 +5,12 @@ export interface AMapMarker {
   on(event: 'click', handler: () => void): void;
   setPosition(position: Coordinate): void;
 }
+export interface AMapPolyline { setPath(path: Coordinate[]): void }
+export type AMapOverlay = AMapMarker | AMapPolyline;
 export interface AMapInstance {
   on(event: string, handler: (event: MapEvent) => void): void;
-  add(marker: AMapMarker): void;
-  remove(marker: AMapMarker): void;
+  add(overlay: AMapOverlay): void;
+  remove(overlay: AMapOverlay): void;
   getCenter(): LngLat;
   getZoom(): number;
   setZoomAndCenter(zoom: number, center: Coordinate): void;
@@ -18,6 +20,7 @@ export interface AMapInstance {
 export interface AMapSDK {
   Map: new (element: HTMLElement, options: { zoom: number; center?: Coordinate; resizeEnable: boolean }) => AMapInstance;
   Marker: new (options: { position: Coordinate; content: HTMLElement; title: string; anchor: string }) => AMapMarker;
+  Polyline: new (options: { path: Coordinate[]; strokeColor: string; strokeWeight: number; strokeOpacity: number; lineJoin: string; lineCap: string }) => AMapPolyline;
 }
 declare global {
   interface Window {

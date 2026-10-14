@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { loadAMap, validCoordinate } from './amap';
-import type { AMapInstance, AMapMarker, AMapSDK, Coordinate } from './amap';
+import type { AMapInstance, AMapMarker, AMapPolyline, AMapSDK, Coordinate } from './amap';
 
 export interface MapPoint { id: string; name: string; location: Coordinate; origin?: boolean }
+export interface MapRoute { id: string; mode: string; geometry: Coordinate[][] }
 interface Props {
   points: MapPoint[];
+  routes?: MapRoute[];
   center: Coordinate | null;
   zoom: number;
   focus: { id: string; sequence: number } | null;
@@ -21,6 +23,7 @@ export function AMapCanvas(props: Props) {
   const map = useRef<AMapInstance | null>(null);
   const sdk = useRef<AMapSDK | null>(null);
   const markers = useRef(new Map<string, { marker: AMapMarker; pin: HTMLElement }>());
+  const polylines = useRef<AMapPolyline[]>([]);
   const fitted = useRef(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +55,7 @@ export function AMapCanvas(props: Props) {
         }
       });
     }).catch(reason => { if (alive) setError(reason instanceof Error ? reason.message : '高德地图加载失败。'); });
-    return () => { alive = false; clearTimeout(timeout); map.current?.destroy(); map.current = null; sdk.current = null; markers.current.clear(); };
+    return () => { alive = false; clearTimeout(timeout); map.current?.destroy(); map.current = null; sdk.current = null; markers.current.clear(); polylines.current = []; };
   }, [attempt]);
   useEffect(() => {
     const instance = map.current, AMap = sdk.current;
@@ -78,6 +81,20 @@ export function AMapCanvas(props: Props) {
       if (!props.center) instance.setFitView();
     }
   }, [ready, props.points, props.focus?.id, props.center]);
+  useEffect(() => {
+    const instance = map.current, AMap = sdk.current;
+    if (!ready || !instance || !AMap) return;
+    polylines.current.forEach(line => instance.remove(line));
+    polylines.current = [];
+    const colors: Record<string, string> = { walking: '#547642', transit: '#4269a4', bicycling: '#b07a25', electrobike: '#92743c', driving: '#8e537b' };
+    (props.routes ?? []).forEach(route => route.geometry.forEach(path => {
+      if (path.length < 2 || !path.every(validCoordinate)) return;
+      const line = new AMap.Polyline({ path, strokeColor: colors[route.mode] ?? '#66745e', strokeWeight: 5, strokeOpacity: 0.85, lineJoin: 'round', lineCap: 'round' });
+      polylines.current.push(line); instance.add(line);
+    }));
+    if (polylines.current.length && !props.center) instance.setFitView();
+    return () => { polylines.current.forEach(line => instance.remove(line)); polylines.current = []; };
+  }, [ready, props.routes]);
   useEffect(() => {
     const instance = map.current;
     if (!ready || !instance || !props.center) return;

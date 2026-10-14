@@ -6,7 +6,45 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from .discovery_tasks import DiscoveryBudget, DiscoveryUsage
 from .models import Model, Version
+
+PLAN_STAGES = ("planning_input", "routing", "scheduled")
+
+
+class PlanningBudget(DiscoveryBudget):
+    max_steps: int = Field(default=100, strict=True, ge=1, le=400)
+    max_routes: int = Field(default=40, strict=True, ge=1, le=40)
+    max_combinations: int = Field(default=3, strict=True, ge=1, le=3)
+    max_searches: int = Field(default=2, strict=True, ge=1, le=4)
+    reserved_gap_searches: int = Field(default=0, strict=True, ge=0, le=2)
+    target_notes: int = Field(default=2, strict=True, ge=1, le=5)
+    comment_limit: int = Field(default=5, strict=True, ge=0, le=20)
+    max_model_calls: int = Field(default=4, strict=True, ge=1, le=8)
+    max_images: int = Field(default=0, strict=True, ge=0, le=3)
+    max_tokens: int = Field(default=131072, strict=True, ge=1, le=262144)
+
+
+class PlanningUsage(DiscoveryUsage):
+    amap_calls: int = Field(default=0, strict=True, ge=0)
+    route_calls: int = Field(default=0, strict=True, ge=0)
+    city_calls: int = Field(default=0, strict=True, ge=0)
+    cache_hits: int = Field(default=0, strict=True, ge=0)
+
+
+class PlanningCheckpoint(Model):
+    completed_stages: list[str] = Field(default_factory=list, max_length=3)
+    planning_input: dict | None = None
+    routing: list[dict] | None = Field(default=None, max_length=3)
+    scheduled: dict | None = None
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if self.completed_stages != list(
+            PLAN_STAGES[: len(self.completed_stages)]
+        ) or any(getattr(self, stage) is None for stage in self.completed_stages):
+            raise ValueError("规划检查点顺序或结果不完整")
+        return self
 
 
 class PlanPayload(Model):

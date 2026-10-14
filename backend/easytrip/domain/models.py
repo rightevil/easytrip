@@ -55,6 +55,7 @@ class ActivityConstraint(Model):
 
 
 class PlanningConstraints(Model):
+    origin_city: Annotated[str, Field(max_length=200)] | None = None
     timezone: Annotated[str, Field(min_length=1, max_length=100)] = "Asia/Shanghai"
     return_to_origin: bool = Field(default=False, strict=True)
     end_candidate_id: Identifier | None = None
@@ -151,6 +152,7 @@ class ConfirmedOrigin(Model):
     poi_id: Identifier | None = None
     source: Literal["amap", "map"]
     request_origin: Annotated[str, Field(max_length=200)] | None = None
+    city: Annotated[str, Field(max_length=200)] | None = None
 
     @model_validator(mode="after")
     def provenance(self):

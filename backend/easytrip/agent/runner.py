@@ -18,10 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 class RunExecutor:
-    def __init__(self, database, *, before_stage=None, discovery=None):
+    def __init__(self, database, *, before_stage=None, discovery=None, planning=None):
         self.database = database
         self.before_stage = before_stage
         self.discovery = discovery
+        self.planning = planning
         self._wake = asyncio.Event()
         self._worker = None
         self._current = None
@@ -92,6 +93,12 @@ class RunExecutor:
                 self._generation = None
 
     async def _execute(self, run):
+        if run["kind"] == "plan":
+            if self.planning is None:
+                await self._db("stop_run", run["id"], run["generation"], "failed", "planning_unavailable")
+            else:
+                await self.planning.execute(run)
+            return
         if run["kind"] == "discover":
             if self.discovery is None:
                 await self._db("stop_run", run["id"], run["generation"], "failed", "discovery_unavailable")

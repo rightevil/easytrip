@@ -638,6 +638,7 @@ class PlaceStore:
                     poi_id=verified.id,
                     source="amap",
                     request_origin=request_origin,
+                    city=verified.city,
                 )
             else:
                 origin = ConfirmedOrigin(

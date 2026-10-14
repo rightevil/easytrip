@@ -34,6 +34,7 @@ export interface PlacePoint extends Poi {
   categories: Candidate['category'][];
 }
 export interface ConfirmedOrigin {
+  city?: string | null;
   name: string;
   location: Coordinate;
   poi_id: string | null;
