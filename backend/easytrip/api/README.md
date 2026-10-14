@@ -2,6 +2,8 @@
 
 数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
+当前连续数据库迁移为 4（`004_places.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 路线、时间表和正式方案接口尚未实现。
+
 | 方法与路径 | 请求 / 返回 |
 |---|---|
 | `POST /api/trips` | `operation_id`（UUID）、可选 `name` / `request`；返回已持久化行程 |
@@ -56,3 +58,26 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 发现预算默认 600 秒、8 次搜索（预留 2 次补查）、30 篇目标、每篇 20 条一级评论；二级回复关闭，开启后另限全轮 20 条。六阶段按顺序落库；计数区分新取得来源、沿用来源、评论选取/分析/判断、图片提交次数及原图去重覆盖。字段缺失表示历史记录未知，不能推导为零。候选为 `unmatched` 文字草案，`semantic_quality=not_validated` 表示尚无人类完成语义验收。
 
 任务增加 `paused` 状态。取消、恢复仍携带当前 `generation`，条件已变或行程已归档时拒绝执行。恢复复用成功结果与剩余预算；同轮已有失败或未知模型请求时不会再次提交输入，新轮必须显式创建并有独立预算。未知用量保留 `reserved_tokens/unknown_cost_calls/unknown_result_calls`，实际 token 不转换为人民币。来源及调用内容不会覆盖条件，旧轮可指定 `run_id` 查看但不可采用旧方向。
+
+## P3 地点、地图与出发点
+
+| 方法与路径 | 请求 / 返回 |
+|---|---|
+| `GET /api/trips/{id}/places` | 可选 UUID `run_id`；返回 `run_id/request_version/candidates/matches/points/trip/read_at`，默认当前条件下最新有结果轮次 |
+| `POST /api/trips/{id}/places/match` | `expected_version`、`expected_workspace_version`、可选 `run_id/candidate_ids/refresh_map`；核对当前候选，返回地点快照及 `budget` |
+| `POST /api/trips/{id}/places/candidates/{candidate_id}/confirm` | 两个预期版本及 `poi_id`；只确认该候选已存备选，经真实详情验证后返回地点快照 |
+| `POST /api/trips/{id}/places/map` | 两个预期版本、`action`；单项操作另需 `candidate_id`，整组操作可传 `category/city`；返回地点快照及保存后的行程 |
+| `GET /api/trips/{id}/places/origin/search` | 必填 `query`（1–80 字）、`city`（1–200 字）、`expected_version`；返回 `search_id/request_version/request_origin/items`，只搜索、不确认 |
+| `POST /api/trips/{id}/places/origin/confirm` | 两个预期版本及 `source`；`amap` 需 `search_id/poi_id`，`map` 需 `name/location`；返回保存后的行程 |
+
+两个预期版本分别指 `request_version` 和 `workspace_version`；地图/起点选择只更新工作区，不修改原行程条件。地图动作是 `initialize/refresh/add/remove/select/unselect`：`add/remove` 操作地图集合，`select/unselect` 操作行程选择，`initialize` 仅首次建立点集，`refresh` 显式重新取 Top 8。地图点按真实 POI ID 聚合，点内保留原候选、来源以及含 `run_id` 的活动和证据引用；`points` 是可用 POI 集合，客户端必须另按 `trip.workspace.map_visible_ids` 和图层筛选绘制。
+
+已经初始化地图或本行程已有 POI 匹配覆盖时，普通 `PATCH /workspace` 无条件保留数据库内的 `map_visible_ids/selected_ids`，忽略提交的旧集合；集合修改必须走 `/places/map`。普通保存保留起点与初始化状态并校验工作区版本，视野、类别和标签仍可编辑。尚未开始 P3 的 P1 工作区继续兼容历史集合。
+
+`matches` 含 `candidate_id/run_id/request_version/status/poi/options/reason/confirmed/updated_at`。状态为 `unique/ambiguous/unmatched`；只有唯一匹配或显式确认且有真实 ID、名称、有效坐标的候选可加入地图或行程选择。泛称和探索方向不直接转成具体 POI。标准 POI 为 `id/name/location/address/city/adcode/type/entrance_location/read_at/api_version/missing_fields`；`location` 是 GCJ-02 `[经度,纬度]`，未取得字段为 `null` 并列入 `missing_fields`，入口缺失不复用中心点。
+
+每次匹配最多 20 个候选，`candidate_ids` 显式指定时最多 20 个；默认每个名称至多两页、每页 20 条。操作共限 40 次物理请求和 60 秒，`budget` 返回 `candidate_limit/call_limit/timeout_seconds/calls/processed/limited`，缓存命中不记新请求。应用内高德请求共享 1.1 秒间隔，不自动重试 QPS 错误。超时或预算结束保留已完成匹配与原候选。缓存以规范化名称、城市、v5 版本为键，24 小时到期，保留原 `read_at`；高德 `count` 仅指本页数量，页数未穷尽不自动唯一匹配。
+
+人工确认和高德起点确认额外请求所选 ID 的详情，限制一次物理请求、30 秒，核对唯一返回的 ID、有效坐标、名称及城市。起点搜索最多两次请求、30 秒。详情错误返回 502，未配置高德服务返回 503，空白城市/关键词等入参错误为 422，行程归属、旧条件、已归档或版本冲突拒绝操作；确认失败不替换原备选。异步核对结果提交时复查条件与匹配会话，工作区已有更新时保留新点集并返回 `map_update_skipped`。
+
+`candidates` 保留原 `evidence_ids` 并增加 POI 状态、来源 ID 与 `ranking_reasons`。排序仅对已核城市/类别冲突作资格过滤，再用明示偏好短语的关联原文字面命中、不同作者、亲历正负评论、原发布时间解释次序；负面或混合命中显示冲突。无法确认当前价格时不以预算硬排除，不将点赞、样本数量或采样比例称为全平台好评率。地点确认不表示 P2 语义质量通过，也不代表路线与时间表已可执行。
