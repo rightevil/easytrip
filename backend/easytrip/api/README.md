@@ -2,7 +2,7 @@
 
 数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
-当前连续数据库迁移为 4（`004_places.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 路线、时间表和正式方案接口尚未实现。
+当前连续数据库迁移为 5（`005_plans.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 已接通规划输入与方案版本底座，真实排程正在分步实现。
 
 | 方法与路径 | 请求 / 返回 |
 |---|---|
@@ -81,3 +81,16 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 人工确认和高德起点确认额外请求所选 ID 的详情，限制一次物理请求、30 秒，核对唯一返回的 ID、有效坐标、名称及城市。起点搜索最多两次请求、30 秒。详情错误返回 502，未配置高德服务返回 503，空白城市/关键词等入参错误为 422，行程归属、旧条件、已归档或版本冲突拒绝操作；确认失败不替换原备选。异步核对结果提交时复查条件与匹配会话，工作区已有更新时保留新点集并返回 `map_update_skipped`。
 
 `candidates` 保留原 `evidence_ids` 并增加 POI 状态、来源 ID 与 `ranking_reasons`。排序仅对已核城市/类别冲突作资格过滤，再用明示偏好短语的关联原文字面命中、不同作者、亲历正负评论、原发布时间解释次序；负面或混合命中显示冲突。无法确认当前价格时不以预算硬排除，不将点赞、样本数量或采样比例称为全平台好评率。地点确认不表示 P2 语义质量通过，也不代表路线与时间表已可执行。
+
+## P4 规划输入与方案版本（分步开发中）
+
+| 方法与路径 | 契约 |
+|---|---|
+| `GET /api/trips/{id}/planning-input` | 返回 `trip_id/request_version/request/planning/origin/selected_ids/selected/missing/input_hash/active_plan_id`；冻结本行程已确认的 POI、活动与来源 |
+| `GET /api/trips/{id}/plans` | 返回不可变版本 `items` 及 `active_plan_id`，最多最近 50 个 |
+| `GET /api/trips/{id}/plans/{plan_id}` | 只读所属行程方案；跨行程返回 404 |
+| `POST /api/trips/{id}/plans/{plan_id}/adopt` | UUID `operation_id`、`expected_version`（条件版本）、`input_hash`；校验当前条件、实质输入及有效期，返回 `{trip,plan}` |
+
+`TripRequest.planning` 保存返程终点/期限、步行上限、禁用模式、额外缓冲和 `activity_constraints`。每个活动的时长/费用必须同时标记 `user/source/estimated/unknown` 来源；空值为未知。必去/锁定不得同时排除或跳过，时间窗和预约使用有时区时间。普通条件 PATCH 会递增请求版本并沿用已有 CAS。
+
+只有服务端执行器可以写方案快照，客户端没有提交 `validated` 或伪造路线的接口。快照含冻结输入、时序、未知、冲突、用量、差异及有效期限。采用拒绝空、缺输入、草稿、部分、冲突或过期方案；条件、起点、选择变化后须重新校验。地图视野和来源全局重读元数据不影响输入签名。当前只有底座已交付，真实路线生成与局部重排仍在开发；不可因此声称 P4 阶段完成。

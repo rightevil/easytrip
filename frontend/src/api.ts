@@ -9,6 +9,7 @@ export interface TripRequest {
   budget_cny: number | null;
   participants: number;
   preferences: string;
+  planning?: PlanningConstraints;
 }
 export interface Workspace {
   active_tab: 'overview' | 'map' | 'plan';
@@ -67,6 +68,7 @@ export interface Trip {
   updated_at: string;
   messages: Message[];
   runs: Run[];
+  active_plan_id?: string | null;
 }
 export interface TripList {
   items: TripSummary[];
@@ -103,6 +105,10 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
 }
 
 export const api = {
+  planningInput: (id: string) => call<PlanningInput>(`/trips/${encodeURIComponent(id)}/planning-input`),
+  plans: (id: string) => call<{ items: Plan[]; active_plan_id: string | null }>(`/trips/${encodeURIComponent(id)}/plans`),
+  plan: (id: string, plan_id: string) => call<Plan>(`/trips/${encodeURIComponent(id)}/plans/${encodeURIComponent(plan_id)}`),
+  adoptPlan: (id: string, plan_id: string, operation_id: string, expected_version: number, input_hash: string) => call<{ trip: Trip; plan: Plan }>(`/trips/${encodeURIComponent(id)}/plans/${encodeURIComponent(plan_id)}/adopt`, 'POST', { operation_id, expected_version, input_hash }),
   list: (includeArchived = false, offset = 0) => call<TripList>(`/trips?include_archived=${includeArchived}&limit=50&offset=${offset}`),
   get: (id: string) => call<Trip>(`/trips/${encodeURIComponent(id)}`),
   create: (operation_id: string) => call<Trip>('/trips', 'POST', { operation_id }),
@@ -148,3 +154,4 @@ export const api = {
 };
 import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
 import type { ConfirmedOrigin, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
+import type { Plan, PlanningConstraints, PlanningInput } from './planning-types';

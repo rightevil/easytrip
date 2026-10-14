@@ -1,0 +1,352 @@
+"""Frozen planning inputs and append-only plan versions under trip ownership."""
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from ..domain.discovery import Activity, Evidence
+from ..domain.models import TripRequest, Workspace
+from ..domain.places import PoiMatch
+from ..domain.planning import SavePlan
+
+
+def planning_hash(value):
+    from .database import encode
+
+    content = {
+        key: value[key]
+        for key in ("trip_id", "request", "origin", "selected_ids", "selected")
+    }
+    return hashlib.sha256(encode(content).encode("utf-8")).hexdigest()
+
+
+class PlanningStore:
+    def _planning_input(self, connection, trip_id):
+        from .database import NotFound
+
+        trip = self._row(connection, trip_id)
+        request = TripRequest.model_validate_json(trip["request_json"])
+        workspace = Workspace.model_validate_json(trip["workspace_json"])
+        origin = workspace.confirmed_origin
+        if origin is not None and origin.request_origin != request.origin:
+            origin = None
+        missing, selected = [], []
+
+        def gap(code, message, candidate_id=None):
+            missing.append(
+                {
+                    "code": code,
+                    "message": message,
+                    **({"candidate_id": candidate_id} if candidate_id else {}),
+                }
+            )
+
+        if origin is None:
+            gap("origin_missing", "请明确确认出发点坐标")
+        if request.start_at is None:
+            gap("start_missing", "请填写带时区的出发日期与时间")
+        if request.duration_minutes is None and request.planning.end_at is None:
+            gap("deadline_missing", "请填写可用时间或结束期限")
+        if not workspace.selected_ids:
+            gap("selection_missing", "请从已确认地点中选择行程项目")
+        cities = set()
+        for identifier in workspace.selected_ids:
+            try:
+                candidate, mentions = self._candidate_for_places(
+                    connection, trip_id, identifier
+                )
+            except NotFound:
+                gap(
+                    "candidate_unavailable",
+                    "所选项目不属于当前行程或已不可用",
+                    identifier,
+                )
+                continue
+            row = connection.execute(
+                "SELECT payload_json FROM candidate_matches WHERE trip_id=? AND candidate_id=?",
+                (trip_id, identifier),
+            ).fetchone()
+            match = PoiMatch.model_validate_json(row[0]) if row else None
+            if (
+                candidate["kind"] != "place"
+                or match is None
+                or match.status != "unique"
+            ):
+                gap("poi_unconfirmed", "所选项目尚未确认真实地点", identifier)
+                continue
+            poi = match.poi.model_dump(mode="json")
+            if poi["city"]:
+                cities.add(poi["city"].removesuffix("市"))
+            else:
+                gap(
+                    "city_unknown", "所选地点所属城市未知，无法校验单城交通", identifier
+                )
+            mention_ids = {item["id"] for item in mentions}
+            activities = [
+                self._entity(item, Activity)
+                for item in connection.execute(
+                    "SELECT * FROM activities WHERE trip_id=? AND run_id=?",
+                    (trip_id, candidate["run_id"]),
+                )
+                if item["mention_id"] in mention_ids
+            ]
+            evidence = []
+            for evidence_id in candidate["evidence_ids"]:
+                item = connection.execute(
+                    "SELECT * FROM evidence WHERE trip_id=? AND run_id=? AND id=?",
+                    (trip_id, candidate["run_id"], evidence_id),
+                ).fetchone()
+                if item is not None:
+                    evidence.append(self._entity(item, Evidence))
+            source_ids = list(
+                dict.fromkeys(
+                    [item["source_id"] for item in mentions]
+                    + [item["source_id"] for item in evidence]
+                )
+            )
+            selected.append(
+                {
+                    "candidate_id": identifier,
+                    "name": candidate["name"],
+                    "category": candidate["category"],
+                    "kind": candidate["kind"],
+                    "city": poi["city"],
+                    "run_id": candidate["run_id"],
+                    "poi": poi,
+                    "activities": activities,
+                    "mentions": mentions,
+                    "sources": [
+                        {
+                            key: value
+                            for key, value in self._source(
+                                connection, trip_id, source_id, candidate["run_id"]
+                            ).items()
+                            if key not in {"first_read_at", "last_read_at"}
+                        }
+                        for source_id in source_ids
+                    ],
+                    "evidence": evidence,
+                }
+            )
+        if len(cities) > 1:
+            gap("cross_city", "P4 只校验单城单日；跨城行程需要后续阶段")
+        selected_ids = {item["candidate_id"] for item in selected}
+        for constraint in request.planning.activity_constraints:
+            if constraint.candidate_id not in selected_ids and (
+                constraint.required
+                or constraint.locked
+                or constraint.state == "completed"
+            ):
+                gap(
+                    "constraint_unavailable",
+                    "必去、锁定或已完成项目缺少可核对的地点快照",
+                    constraint.candidate_id,
+                )
+        if (
+            request.planning.end_candidate_id
+            and request.planning.end_candidate_id not in selected_ids
+        ):
+            gap("endpoint_unavailable", "指定终点必须是本行程已选的确认地点")
+        value = {
+            "trip_id": trip_id,
+            "request_version": trip["request_version"],
+            "request": request.model_dump(mode="json"),
+            "planning": request.planning.model_dump(mode="json"),
+            "origin": origin.model_dump(mode="json") if origin else None,
+            "selected_ids": workspace.selected_ids,
+            "selected": selected,
+            "missing": missing,
+            "active_plan_id": trip["active_plan_id"],
+        }
+        value["input_hash"] = planning_hash(value)
+        return value
+
+    def planning_input(self, trip_id):
+        with self.connection() as connection:
+            connection.execute("BEGIN")
+            return self._planning_input(connection, trip_id)
+
+    @staticmethod
+    def _plan(row):
+        result = dict(row)
+        result["payload"] = json.loads(result.pop("payload_json"))
+        result.pop("operation_id")
+        return result
+
+    @staticmethod
+    def _plan_row(connection, trip_id, plan_id):
+        from .database import NotFound
+
+        row = connection.execute(
+            "SELECT * FROM plans WHERE id=? AND trip_id=?", (plan_id, trip_id)
+        ).fetchone()
+        if row is None:
+            raise NotFound()
+        return row
+
+    def list_plans(self, trip_id):
+        with self.connection() as connection:
+            connection.execute("BEGIN")
+            trip = self._row(connection, trip_id)
+            return {
+                "items": [
+                    self._plan(row)
+                    for row in connection.execute(
+                        "SELECT * FROM plans WHERE trip_id=? ORDER BY version DESC LIMIT 50",
+                        (trip_id,),
+                    )
+                ],
+                "active_plan_id": trip["active_plan_id"],
+            }
+
+    def get_plan(self, trip_id, plan_id):
+        with self.connection() as connection:
+            return self._plan(self._plan_row(connection, trip_id, plan_id))
+
+    def save_plan(self, trip_id, body: SavePlan):
+        from .database import OperationConflict, encode, now
+
+        if body.input_hash != planning_hash(body.payload.input):
+            raise ValueError("方案的冻结输入签名不匹配")
+        if body.payload.input.get("trip_id") != trip_id:
+            raise ValueError("方案的冻结输入不属于当前行程")
+        if body.request_version != body.payload.input["request_version"]:
+            raise ValueError("方案的请求版本不匹配")
+        if body.status == "validated" and (
+            body.payload.input["missing"]
+            or not body.payload.itinerary
+            or body.payload.unknowns
+            or body.payload.conflicts
+            or body.payload.valid_until is None
+        ):
+            raise ValueError("未完整校验的方案不能声明可执行")
+        if body.status in {"validated", "conditional"} and body.payload.conflicts:
+            raise ValueError("存在硬约束冲突的方案不可标为可行")
+        if (
+            len(encode(body.payload.model_dump(mode="json")).encode("utf-8"))
+            > 2_097_152
+        ):
+            raise ValueError("方案快照超过2MiB")
+        with self.connection(write=True) as connection:
+            self._editable(self._row(connection, trip_id))
+            previous = connection.execute(
+                "SELECT * FROM plans WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            payload = encode(body.payload.model_dump(mode="json"))
+            if previous is not None:
+                if (
+                    previous["input_hash"],
+                    previous["request_version"],
+                    previous["payload_json"],
+                    previous["status"],
+                    previous["parent_plan_id"],
+                    previous["run_id"],
+                ) != (
+                    body.input_hash,
+                    body.request_version,
+                    payload,
+                    body.status,
+                    str(body.parent_plan_id) if body.parent_plan_id else None,
+                    str(body.run_id) if body.run_id else None,
+                ):
+                    raise OperationConflict("方案操作ID已用于不同内容")
+                return self._plan(previous)
+            if body.parent_plan_id:
+                self._plan_row(connection, trip_id, str(body.parent_plan_id))
+            if body.run_id:
+                run = self._run_row(connection, str(body.run_id), trip_id)
+                if run["request_version"] != body.request_version:
+                    raise OperationConflict("任务与方案条件版本不一致")
+            version = connection.execute(
+                "SELECT COALESCE(MAX(version),0)+1 FROM plans WHERE trip_id=?",
+                (trip_id,),
+            ).fetchone()[0]
+            identifier = str(uuid4())
+            connection.execute(
+                "INSERT INTO plans(id,trip_id,operation_id,version,request_version,input_hash,parent_plan_id,run_id,status,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    identifier,
+                    trip_id,
+                    str(body.operation_id),
+                    version,
+                    body.request_version,
+                    body.input_hash,
+                    str(body.parent_plan_id) if body.parent_plan_id else None,
+                    str(body.run_id) if body.run_id else None,
+                    body.status,
+                    payload,
+                    now(),
+                ),
+            )
+            return self._plan(self._plan_row(connection, trip_id, identifier))
+
+    def adopt_plan(self, trip_id, plan_id, body):
+        from .database import OperationConflict, now
+
+        with self.connection(write=True) as connection:
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            self._version(trip, body.expected_version)
+            plan = self._plan(self._plan_row(connection, trip_id, plan_id))
+            current = self._planning_input(connection, trip_id)
+            if (
+                plan["request_version"] != body.expected_version
+                or plan["input_hash"] != body.input_hash
+                or current["input_hash"] != body.input_hash
+            ):
+                raise OperationConflict(
+                    "规划条件、起点或已选项目已改变，请重新校验方案"
+                )
+            if (
+                plan["status"] not in {"validated", "conditional"}
+                or current["missing"]
+                or plan["payload"]["conflicts"]
+                or not plan["payload"]["itinerary"]
+            ):
+                raise OperationConflict("缺输入、部分结果或冲突方案不能采用")
+            valid_until = plan["payload"].get("valid_until")
+            if not valid_until or datetime.fromisoformat(valid_until) <= datetime.now(
+                timezone.utc
+            ):
+                raise OperationConflict("路线已过期，请重新校验后采用")
+            if (
+                current["request"]["planning"]["activity_constraints"]
+                and any(
+                    item["state"] == "completed"
+                    for item in current["request"]["planning"]["activity_constraints"]
+                )
+                and plan["parent_plan_id"] != trip["active_plan_id"]
+            ):
+                raise OperationConflict("已有已完成项目，旧方案须沿用当前历史重新校验")
+            previous = connection.execute(
+                "SELECT * FROM plan_adoptions WHERE trip_id=? AND operation_id=?",
+                (trip_id, str(body.operation_id)),
+            ).fetchone()
+            if previous is not None and (
+                previous["plan_id"],
+                previous["request_version"],
+                previous["input_hash"],
+            ) != (plan_id, body.expected_version, body.input_hash):
+                raise OperationConflict("采用操作ID已用于不同方案")
+            if previous is None:
+                connection.execute(
+                    "INSERT INTO plan_adoptions VALUES(?,?,?,?,?,?)",
+                    (
+                        trip_id,
+                        str(body.operation_id),
+                        plan_id,
+                        body.expected_version,
+                        body.input_hash,
+                        now(),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE trips SET active_plan_id=?,updated_at=? WHERE id=?",
+                    (plan_id, now(), trip_id),
+                )
+            return {
+                "trip": self._detail(connection, self._row(connection, trip_id)),
+                "plan": plan,
+            }

@@ -13,6 +13,91 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ActivityConstraint(Model):
+    candidate_id: Identifier
+    duration_minutes: Annotated[int, Field(strict=True, ge=1, le=1440)] | None = None
+    duration_source: Literal["user", "source", "estimated", "unknown"] = "unknown"
+    cost_cny: (
+        Annotated[float, Field(strict=True, ge=0, le=10000000, allow_inf_nan=False)]
+        | None
+    ) = None
+    cost_source: Literal["user", "source", "estimated", "unknown"] = "unknown"
+    required: bool = Field(default=False, strict=True)
+    excluded: bool = Field(default=False, strict=True)
+    locked: bool = Field(default=False, strict=True)
+    state: Literal["pending", "completed", "skipped"] = "pending"
+    fixed_start_at: datetime | None = None
+    not_before: datetime | None = None
+    not_after: datetime | None = None
+
+    @field_validator("fixed_start_at", "not_before", "not_after")
+    @classmethod
+    def aware_times(cls, value):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("活动时间必须包含时区")
+        return value
+
+    @model_validator(mode="after")
+    def consistent(self):
+        if self.required and (self.excluded or self.state == "skipped"):
+            raise ValueError("必去活动不能同时排除或跳过")
+        if self.locked and (self.excluded or self.state == "skipped"):
+            raise ValueError("锁定活动不能同时排除或跳过")
+        if self.not_before and self.not_after and self.not_before >= self.not_after:
+            raise ValueError("活动时间窗必须有正时长")
+        for value, source in (
+            (self.duration_minutes, self.duration_source),
+            (self.cost_cny, self.cost_source),
+        ):
+            if (value is None) != (source == "unknown"):
+                raise ValueError("时长及费用必须同时记录数值与来源；未知不可补数")
+        return self
+
+
+class PlanningConstraints(Model):
+    timezone: Annotated[str, Field(min_length=1, max_length=100)] = "Asia/Shanghai"
+    return_to_origin: bool = Field(default=False, strict=True)
+    end_candidate_id: Identifier | None = None
+    end_at: datetime | None = None
+    max_walk_meters: Annotated[int, Field(strict=True, ge=0, le=100000)] | None = None
+    disabled_modes: list[
+        Literal["walking", "transit", "bicycling", "electrobike", "driving"]
+    ] = Field(default_factory=list, max_length=5)
+    transfer_buffer_minutes: Annotated[int, Field(strict=True, ge=0, le=120)] = 10
+    activity_constraints: list[ActivityConstraint] = Field(
+        default_factory=list, max_length=100
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def timezone_name(cls, value):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("规划时区必须是有效的 IANA 时区") from None
+        return value
+
+    @field_validator("end_at")
+    @classmethod
+    def aware_end(cls, value):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("返程期限必须包含时区")
+        return value
+
+    @model_validator(mode="after")
+    def distinct_constraints(self):
+        ids = [item.candidate_id for item in self.activity_constraints]
+        if len(ids) != len(set(ids)) or len(self.disabled_modes) != len(
+            set(self.disabled_modes)
+        ):
+            raise ValueError("活动约束与禁用交通不能重复")
+        if self.return_to_origin and self.end_candidate_id:
+            raise ValueError("终点必须选择返回起点或指定地点之一")
+        return self
+
+
 class TripRequest(Model):
     destination: Annotated[str, Field(max_length=200)] | None = None
     origin: Annotated[str, Field(max_length=200)] | None = None
@@ -28,6 +113,7 @@ class TripRequest(Model):
     ) = None
     participants: Annotated[int, Field(strict=True, ge=1, le=100)] = 1
     preferences: Annotated[str, Field(max_length=4000)] = ""
+    planning: PlanningConstraints = Field(default_factory=PlanningConstraints)
 
     @model_validator(mode="after")
     def transport_provenance(self):
@@ -36,6 +122,12 @@ class TripRequest(Model):
             and "transport_source" not in self.model_fields_set
         ):
             self.transport_source = "user"
+        if (
+            self.start_at
+            and self.planning.end_at
+            and self.planning.end_at <= self.start_at
+        ):
+            raise ValueError("结束期限必须晚于出发时间")
         return self
 
     @field_validator("start_at", mode="before")
@@ -62,7 +154,9 @@ class ConfirmedOrigin(Model):
 
     @model_validator(mode="after")
     def provenance(self):
-        if not self.name.strip() or (self.source == "amap") != (self.poi_id is not None):
+        if not self.name.strip() or (self.source == "amap") != (
+            self.poi_id is not None
+        ):
             raise ValueError("起点名称和POI来源标识无效")
         return self
 

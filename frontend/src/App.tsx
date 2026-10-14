@@ -7,6 +7,7 @@ import { TripSession } from './session';
 import { Runs } from './Runs';
 import { Discovery } from './Discovery';
 import { MapWorkspace } from './MapWorkspace';
+import { Planning } from './Planning';
 
 const labels = { saved: '已保存', dirty: '等待保存', saving: '保存中', error: '保存失败', conflict: '发生版本冲突' };
 const transports: [TripRequest['transport'], string][] = [['mixed', '灵活组合'], ['walking', '步行'], ['transit', '公共交通'], ['bicycling', '骑行'], ['electrobike', '电动车'], ['driving', '自驾']];
@@ -209,7 +210,7 @@ function TripView({ session, archived, onTrip, onArchive, onDelete, busy }: { se
     <div className="workspace-content"><section className="panel exploration" aria-label="行程工作区"><div className="tabs" role="tablist" aria-label="工作区页面">{tabs.map(([key, label]) => <button role="tab" id={`tab-${key}`} aria-controls="workspace-panel" aria-selected={workspace.active_tab === key} key={key} onClick={() => session.workspace.update({ ...workspace, active_tab: key })}>{label}</button>)}</div><div className="workspace-panel" id="workspace-panel" role="tabpanel" aria-labelledby={`tab-${workspace.active_tab}`}>
       {workspace.active_tab === 'overview' && <><div className="summary-banner"><span className="eyebrow">下一段旅程</span><h2>{draft.request.destination || '目的地，还可以慢慢想'}</h2><p>{draft.request.origin ? `从${draft.request.origin}出发` : '出发地待补充'}<span> · </span>{draft.request.start_at ? new Date(draft.request.start_at).toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间待定'}</p></div><div className="section-subheading"><h3>候选地点</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><Discovery session={session} requestVersion={requestSave.version} category={workspace.category} archived={archived} /></>}
       {workspace.active_tab === 'map' && <><div className="section-subheading"><h3>地点与地图</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><MapWorkspace session={session} archived={archived} /><MapPreferences workspace={workspace} onChange={value => session.workspace.update(value)} /><Discovery session={session} requestVersion={requestSave.version} category={workspace.category} archived={archived} /></>}
-      {workspace.active_tab === 'plan' && <><div className="section-subheading"><h3>行程时间表</h3><span className="badge">尚未接入</span></div><Empty icon="≋" title="为旅程留一点空白" description="时间安排与方案生成将在 P4 接入。已保存条件与文字候选会作为规划起点。" /></>}
+      {workspace.active_tab === 'plan' && <Planning session={session} archived={archived} />}
     </div></section><Chat session={session} archived={archived} /><Runs session={session} requestVersion={requestSave.version} archived={archived} /></div></div>
   </>;
 }

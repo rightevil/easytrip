@@ -15,6 +15,7 @@ from .agent.discovery import DiscoveryRunner
 from .agent.runner import RunExecutor
 from .api.discovery import make_router as make_discovery_router
 from .api.places import make_router as make_places_router
+from .api.planning import make_router as make_planning_router
 from .api.runs import make_router as make_runs_router
 from .api.trips import make_router as make_trips_router
 from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
@@ -56,6 +57,7 @@ def create_app(
     application.include_router(make_runs_router())
     application.include_router(make_discovery_router())
     application.include_router(make_places_router())
+    application.include_router(make_planning_router())
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )

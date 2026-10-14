@@ -37,6 +37,7 @@ from .actions import ActionStore
 from .discovery import DiscoveryStore
 from .discovery_runs import DiscoveryRunStore
 from .places import PlaceStore
+from .planning import PlanningStore
 
 
 class NotFound(Exception):
@@ -66,7 +67,7 @@ def encode(value):
     )
 
 
-class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore):
+class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, PlanningStore):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -125,6 +126,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore):
             connection.execute("SELECT discovery_run_id FROM messages LIMIT 0")
             connection.execute("SELECT stage_started_at FROM runs LIMIT 0")
             connection.execute("SELECT candidate_id,run_id,payload_json FROM candidate_matches LIMIT 0")
+            connection.execute("SELECT id,input_hash,payload_json FROM plans LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):
@@ -161,6 +163,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore):
             "workspace_version": row["workspace_version"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "active_plan_id": row["active_plan_id"] if "active_plan_id" in row.keys() else None,
         }
 
     @staticmethod
