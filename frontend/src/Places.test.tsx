@@ -40,6 +40,87 @@ afterEach(() => { cleanup(); current.dispose(); vi.restoreAllMocks(); });
 const card = (name: string) => within(screen.getByRole('heading', { name }).closest('article')!);
 
 describe('P3 map and candidate operations', () => {
+  it('keeps an older selected source run and its unresolved POI options when map actions return the latest empty run', async () => {
+    const latest = { ...discoveryRun, id: 'latest-empty', status: 'paused' as const, stage: 'fetching' as const, created_at: '2026-10-14T02:00:00Z' };
+    current.dispose(); current = new TripSession({ ...trip(), runs: [latest, discoveryRun] }, () => {});
+    snapshot.trip.runs = [latest, discoveryRun];
+    snapshot.candidates = [candidate(0, { name: '太子湾' }), candidate(1, { name: '花港' })];
+    snapshot.matches = [match(0, { confirmed: true }), match(1, { status: 'ambiguous', poi: null, options: [poi(1), poi(2)] })];
+    const empty = (): PlacesSnapshot => ({ ...structuredClone(snapshot), run_id: latest.id, candidates: [], matches: [] });
+    vi.mocked(api.places).mockImplementation(async (_id, runId) => runId === discoveryRun.id ? structuredClone(snapshot) : empty());
+    vi.mocked(api.candidates).mockImplementation(async (_id, runId) => ({ items: runId === discoveryRun.id ? snapshot.candidates : [], total: runId === discoveryRun.id ? 2 : 0, limit: 20, offset: 0 }));
+    vi.spyOn(api, 'mapAction').mockImplementation(async (_id, _version, workspaceVersion, action, options) => {
+      snapshot.trip.workspace_version = workspaceVersion + 1;
+      if (action === 'add') snapshot.trip.workspace.map_visible_ids = [options!.candidate_id!];
+      if (action === 'select') snapshot.trip.workspace.selected_ids = [options!.candidate_id!];
+      return empty();
+    });
+    render(<><MapWorkspace session={current} archived={false} /><Discovery session={current} requestVersion={1} category="all" archived={false} /></>);
+    await userEvent.selectOptions(screen.getByLabelText('查看发现轮次'), discoveryRun.id);
+    await waitFor(() => expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy());
+    let finish!: (value: PlacesSnapshot) => void;
+    vi.mocked(api.places).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await userEvent.click(card('太子湾').getByRole('button', { name: '加入地图' }));
+    await waitFor(() => expect(current.workspace.getSnapshot().value.map_visible_ids).toEqual(['candidate-0']));
+    expect(current.getPlacesSnapshot().snapshot?.run_id).toBe(discoveryRun.id);
+    expect(card('太子湾').getByText('人工确认地点')).toBeTruthy();
+    expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy();
+    await act(async () => { finish(structuredClone(snapshot)); });
+    await userEvent.click(card('太子湾').getByRole('button', { name: '加入行程' }));
+    await waitFor(() => expect(current.workspace.getSnapshot().value.selected_ids).toEqual(['candidate-0']));
+    expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy();
+    expect((screen.getByLabelText('查看发现轮次') as HTMLSelectElement).value).toBe(discoveryRun.id);
+    expect(api.places).toHaveBeenLastCalledWith('one', discoveryRun.id);
+  });
+  it('remembers a new selected source while a map action is in flight and rejects the earlier source reread', async () => {
+    snapshot.candidates = [candidate(0)]; snapshot.matches = [match(0)];
+    await current.readPlaces(discoveryRun.id);
+    let finish!: (value: PlacesSnapshot) => void;
+    vi.spyOn(api, 'mapAction').mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const pending = current.mapAction('select', 'candidate-0');
+    await waitFor(() => expect(api.mapAction).toHaveBeenCalled());
+    await current.readPlaces('other-source');
+    const other = { ...structuredClone(snapshot), run_id: 'other-source', candidates: [candidate(1, { run_id: 'other-source' })], matches: [match(1, { run_id: 'other-source' })] };
+    vi.mocked(api.places).mockResolvedValue(other);
+    snapshot.trip.workspace_version = 2; snapshot.trip.workspace.selected_ids = ['candidate-0']; other.trip = structuredClone(snapshot.trip);
+    finish({ ...structuredClone(snapshot), run_id: 'latest-empty', candidates: [], matches: [] });
+    expect(await pending).toBe(true);
+    expect(current.getPlacesSnapshot().snapshot?.run_id).toBe('other-source');
+    expect(current.getPlacesSnapshot().snapshot?.candidates.map(item => item.id)).toEqual(['candidate-1']);
+    expect(api.places).toHaveBeenLastCalledWith('one', 'other-source');
+  });
+  it('does not apply a map action response after the trip session has been closed', async () => {
+    snapshot.candidates = [candidate(0)]; snapshot.matches = [match(0)];
+    await current.readPlaces(discoveryRun.id);
+    let finish!: (value: PlacesSnapshot) => void;
+    vi.spyOn(api, 'mapAction').mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const pending = current.mapAction('select', 'candidate-0');
+    await waitFor(() => expect(api.mapAction).toHaveBeenCalled());
+    current.dispose();
+    snapshot.trip.workspace_version = 2; snapshot.trip.workspace.selected_ids = ['candidate-0'];
+    finish(structuredClone(snapshot));
+    expect(await pending).toBe(false);
+    expect(current.workspace.getSnapshot().value.selected_ids).toEqual([]);
+  });
+  it('ignores an old source reread after the user changes sources during its pending response', async () => {
+    snapshot.candidates = [candidate(0)]; snapshot.matches = [match(0)];
+    await current.readPlaces(discoveryRun.id);
+    let finish!: (value: PlacesSnapshot) => void;
+    vi.mocked(api.places).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    snapshot.trip.workspace_version = 2; snapshot.trip.workspace.selected_ids = ['candidate-0'];
+    vi.spyOn(api, 'mapAction').mockResolvedValue({ ...structuredClone(snapshot), run_id: 'latest-empty', candidates: [], matches: [] });
+    const pending = current.mapAction('select', 'candidate-0');
+    await waitFor(() => expect(api.places).toHaveBeenCalledTimes(2));
+    await current.readPlaces('another-source');
+    const another = { ...structuredClone(snapshot), run_id: 'another-source', candidates: [candidate(1, { run_id: 'another-source' })], matches: [match(1, { run_id: 'another-source' })] };
+    vi.mocked(api.places).mockResolvedValue(another);
+    finish(structuredClone(snapshot));
+    await pending;
+    await waitFor(() => expect(current.getPlacesSnapshot().snapshot?.run_id).toBe('another-source'));
+    expect(current.getPlacesSnapshot().snapshot?.candidates.map(item => item.id)).toEqual(['candidate-1']);
+    await current.readPlaces();
+    expect(api.places).toHaveBeenLastCalledWith('one', 'another-source');
+  });
   it('adds the ninth candidate incrementally and selects it separately using current workspace versions', async () => {
     snapshot.candidates = Array.from({ length: 9 }, (_, index) => candidate(index));
     snapshot.matches = Array.from({ length: 9 }, (_, index) => match(index));

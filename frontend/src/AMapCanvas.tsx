@@ -11,6 +11,7 @@ interface Props {
   zoom: number;
   focus: { id: string; sequence: number } | null;
   picking: boolean;
+  pickNotice?: string;
   onViewport: (center: Coordinate, zoom: number) => void;
   onSelect: (id: string) => void;
   onPick: (location: Coordinate) => void;
@@ -110,6 +111,6 @@ export function AMapCanvas(props: Props) {
     <div ref={container} className="amap-container" aria-label="高德地图：已确认的候选与出发点" />
     {!ready && !error && <p className="map-load-status" role="status">正在加载高德真实地图…</p>}
     {error && <div className="map-load-status map-load-error" role="alert"><p>{error}</p><button onClick={() => setAttempt(value => value + 1)}>重新加载地图</button></div>}
-    {ready && props.picking && <p className="map-pick-notice" role="status">点击地图选择出发点，再确认保存。</p>}
+    {ready && props.picking && <p className="map-pick-notice" role="status">{props.pickNotice ?? '点击地图选择出发点，再确认保存。'}</p>}
   </div>;
 }

@@ -281,6 +281,18 @@ input[type="datetime-local"] { font-size: 11px; padding-left: 8px; padding-right
 .poi-match small { display: block; margin-top: 5px; font-size: 9px; }
 .focused-candidate { border-color: #9d7c43; background: #faf5e6; }
 .planning-generation { margin: 18px 0; }
+.planning-progress { margin: 16px 0; padding: 12px; border: 1px solid #dfe6d5; border-radius: 8px; color: #617455; font-size: 11px; }
+.planning-progress summary { cursor: pointer; }
+.planning-progress p { margin: 9px 0; line-height: 1.9; }
+.planning-progress-actions, .planning-replacement { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.planning-progress-actions button, .planning-replacement button { font-size: 11px; padding: 7px 10px; }
+.planning-replacement label { flex: 1; min-width: 180px; margin: 0; }
+.planning-frozen-conditions { color: #617455; font-size: 11px; margin: 12px 0; }
+.planning-frozen-conditions p { margin-top: 8px; line-height: 1.9; }
+.planning-meal-sources { margin: 14px 0; font-size: 11px; line-height: 1.9; color: #617455; }
+.planning-meal-sources summary { cursor: pointer; }
+.planning-meal-sources article { margin: 12px 0; padding: 12px; border: 1px solid #dfe6d5; border-radius: 8px; }
+.planning-meal-sources blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid #b5c6a4; white-space: pre-wrap; overflow-wrap: anywhere; }
 .planning-generation p, .planning-route-map > p { font-size: 11px; color: #66745e; line-height: 1.9; margin: 8px 0; }
 .planning-run-list { display: grid; gap: 9px; margin: 16px 0; }
 .planning-run-list article { padding: 11px; border: 1px solid #dfe6d5; border-radius: 8px; font-size: 11px; }

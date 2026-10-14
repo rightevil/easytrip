@@ -43,7 +43,7 @@ export interface Run {
   params: Record<string, unknown>;
   budget: { max_steps: number; max_seconds: number } & Partial<DiscoveryBudget> & Partial<PlanningBudget>;
   checkpoint: { completed_stages?: string[]; understanding?: Understanding; [key: string]: unknown };
-  usage: { steps: number; elapsed_seconds: number; external_calls: number; model_tokens: number; images: number; prompt_tokens?: number; completion_tokens?: number; reserved_tokens?: number; unknown_cost_calls?: number; unknown_result_calls?: number; interrupted_stage_time_unknown?: boolean; searches?: number; detail_calls?: number; model_calls?: number; route_calls?: number; city_calls?: number; cache_hits?: number } & DiscoveryCoverage;
+  usage: { steps: number; elapsed_seconds: number; external_calls: number; model_tokens: number; images: number; prompt_tokens?: number; completion_tokens?: number; reserved_tokens?: number; unknown_cost_calls?: number; unknown_result_calls?: number; interrupted_stage_time_unknown?: boolean; searches?: number; detail_calls?: number; model_calls?: number; amap_calls?: number; route_calls?: number; city_calls?: number; poi_calls?: number; cache_hits?: number } & DiscoveryCoverage;
   trip_usage?: TripUsage;
   result: {
     conditions: { conditions_complete: boolean; missing: string[]; destination: string | null; transport: string };
@@ -107,6 +107,8 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
 export const api = {
   startPlanning: (id: string, operation_id: string, expected_version: number, budget: PlanningBudget, parent_plan_id?: string) => call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { kind: 'plan', operation_id, expected_version, budget, ...(parent_plan_id ? { parent_plan_id } : {}) }),
   planningInput: (id: string) => call<PlanningInput>(`/trips/${encodeURIComponent(id)}/planning-input`),
+  planningReplacements: (id: string) => call<PlanningReplacements>(`/trips/${encodeURIComponent(id)}/planning-replacements`),
+  replacePlanningCandidate: (id: string, operation: PlanningReplacement) => call<{ trip: Trip; operation_applied: boolean }>(`/trips/${encodeURIComponent(id)}/planning-replace`, 'POST', operation),
   plans: (id: string) => call<{ items: Plan[]; active_plan_id: string | null }>(`/trips/${encodeURIComponent(id)}/plans`),
   plan: (id: string, plan_id: string) => call<Plan>(`/trips/${encodeURIComponent(id)}/plans/${encodeURIComponent(plan_id)}`),
   adoptPlan: (id: string, plan_id: string, operation_id: string, expected_version: number, input_hash: string) => call<{ trip: Trip; plan: Plan; operation_applied?: boolean }>(`/trips/${encodeURIComponent(id)}/plans/${encodeURIComponent(plan_id)}/adopt`, 'POST', { operation_id, expected_version, input_hash }),
@@ -155,4 +157,4 @@ export const api = {
 };
 import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
 import type { ConfirmedOrigin, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
-import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningResult } from './planning-types';
+import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningReplacement, PlanningReplacements, PlanningResult } from './planning-types';

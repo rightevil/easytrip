@@ -26,3 +26,14 @@ it('starts bounded planning and adopts only a named server plan with its input s
   await api.adoptPlan('one', 'plan-one', 'adopt-operation', 7, 'a'.repeat(64));
   expect(JSON.parse(send.mock.calls[1][1].body)).toEqual({ operation_id: 'adopt-operation', expected_version: 7, input_hash: 'a'.repeat(64) });
 });
+
+it('uses the atomic planning replacement endpoint with a frozen operation and both versions', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.planningReplacements('trip / one');
+  const operation = { operation_id: 'same-operation', expected_version: 7, expected_workspace_version: 9, input_hash: 'a'.repeat(64), candidate_id: 'old', replacement_id: 'new' };
+  await api.replacePlanningCandidate('trip / one', operation);
+  expect(send.mock.calls[0][0]).toBe('/api/trips/trip%20%2F%20one/planning-replacements');
+  expect(send.mock.calls[1][0]).toBe('/api/trips/trip%20%2F%20one/planning-replace');
+  expect(JSON.parse(send.mock.calls[1][1].body)).toEqual(operation);
+});
