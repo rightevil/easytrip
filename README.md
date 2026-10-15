@@ -30,7 +30,9 @@ uv --directory backend run uvicorn easytrip.main:app --host 127.0.0.1 --port 800
 
 工作区：http://127.0.0.1:8000 。独立 P0 地图验证：http://127.0.0.1:8000/p0/map 。P1 不需要填写外部服务配置。
 
-也可使用 Windows 入口：首次 `./scripts/dev.ps1 setup`，然后 `./scripts/dev.ps1 build`、`./scripts/dev.ps1 serve`；`./scripts/dev.ps1 test` 运行前后端回归。`serve -Port 8001` 可选择本机端口。脚本只运行本应用，不修改代理或管理小红书服务。
+也可使用 Windows 入口：首次 `./scripts/dev.ps1 setup`，然后 `./scripts/dev.ps1 build`、`./scripts/dev.ps1 check`、`./scripts/dev.ps1 serve`；`./scripts/dev.ps1 test` 运行前后端回归。`serve -Port 8001` 可选择本机端口。检查仅报告依赖、构建、数据库及配置完整性，不请求外部服务。已有前端构建时，启动不需要 Node/npm。脚本只运行本应用，不修改代理或管理小红书服务。
+
+升级前先退出 EasyTrip，在旧版本执行 `./scripts/dev.ps1 backup`，保留备份后再更新代码。新版本启动遇到旧库也会先自动一致性备份，备份失败即停止迁移。手动备份、恢复及正式路径替换说明见 [Windows 运行与数据恢复](docs/windows-operations.md)。恢复仅接受不存在的目标文件，不覆盖已有数据。
 
 ```powershell
 ./scripts/probes/p0.ps1 probe

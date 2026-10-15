@@ -105,6 +105,14 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > len(migrations):
                 raise RuntimeError("数据库版本高于应用支持版本，请使用匹配的应用")
+            if 0 < version < len(migrations):
+                from .maintenance import backup_database
+
+                backup_path = self.path.parent / "backups" / (
+                    f"{self.path.stem}-v{version}-before-v{len(migrations)}-{uuid4().hex}.sqlite3"
+                )
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_database(self.path, backup_path)
             connection.execute("PRAGMA journal_mode=WAL")
             if version:
                 # Check P1 compatibility before committing further schema changes.
