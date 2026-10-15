@@ -142,6 +142,10 @@ export const api = {
   adoptDirection: (id: string, candidate_id: string, run_id: string, operation_id: string, expected_version: number) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/directions/${encodeURIComponent(candidate_id)}/adopt`, 'POST', { run_id, operation_id, expected_version }),
   places: (id: string, run_id?: string) => call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places${run_id ? `?run_id=${encodeURIComponent(run_id)}` : ''}`),
+  searchManualPlace: (id: string, query: string, city: string, expected_version: number) =>
+    call<ManualPlaceSearch>(`/trips/${encodeURIComponent(id)}/places/manual/search?query=${encodeURIComponent(query)}&city=${encodeURIComponent(city)}&expected_version=${expected_version}`),
+  confirmManualPlace: (id: string, confirmation: ManualPlaceConfirmation) =>
+    call<PlacesSnapshot & { candidate_id: string }>(`/trips/${encodeURIComponent(id)}/places/manual/confirm`, 'POST', confirmation),
   matchPlaces: (id: string, expected_version: number, expected_workspace_version: number, run_id: string) =>
     call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/match`, 'POST', { expected_version, expected_workspace_version, run_id, refresh_map: false }),
   confirmPlace: (id: string, candidate_id: string, expected_version: number, expected_workspace_version: number, poi_id: string) =>
@@ -156,5 +160,5 @@ export const api = {
     call<Trip>(`/trips/${encodeURIComponent(id)}/places/origin/confirm`, 'POST', { expected_version, expected_workspace_version, ...confirmation }),
 };
 import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
-import type { ConfirmedOrigin, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
+import type { ConfirmedOrigin, ManualPlaceConfirmation, ManualPlaceSearch, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
 import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningReplacement, PlanningReplacements, PlanningResult } from './planning-types';

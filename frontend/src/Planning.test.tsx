@@ -38,6 +38,22 @@ it('shows missing origin and real chosen places without claiming a feasible plan
   expect(screen.queryByText('已确认可执行')).toBeNull();
 });
 
+it('edits a manually added candidate without inventing source activities or starting planning automatically', async () => {
+  input.selected[0] = { ...input.selected[0], source: 'user', run_id: null, activities: [], sources: [], evidence: [], mentions: [] };
+  vi.mocked(api.planningInput).mockResolvedValue(structuredClone(input));
+  vi.spyOn(api, 'startPlanning');
+  render(<Planning session={session} archived={false} />);
+  const place = within(await screen.findByRole('group', { name: '西湖散步' }));
+  expect(place.getByText(/用户指定，无攻略或评价证据/)).toBeTruthy();
+  expect((place.getByLabelText('停留分钟') as HTMLInputElement).value).toBe('');
+  expect((place.getByLabelText('确认费用（元/同行全组）') as HTMLInputElement).value).toBe('');
+  fireEvent.change(place.getByLabelText('停留分钟'), { target: { value: '60' } });
+  await act(async () => { await session.flush(); });
+  expect(session.request.getSnapshot().value.request.planning?.activity_constraints[0]).toMatchObject({ duration_minutes: 60, duration_source: 'user', cost_cny: null, cost_source: 'unknown' });
+  expect(api.startPlanning).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: '生成单日方案' })).toBeTruthy();
+});
+
 it('saves explicit duration and disabled cycling with user provenance and keeps unrelated conditions', async () => {
   render(<Planning session={session} archived={false} />);
   await screen.findByRole('group', { name: '西湖散步' });

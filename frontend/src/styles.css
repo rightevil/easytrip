@@ -269,6 +269,10 @@ input[type="datetime-local"] { font-size: 11px; padding-left: 8px; padding-right
 .map-point-list small, .poi-options small, .origin-results small { display: block; font-size: 10px; color: #65765b; margin-top: 4px; line-height: 1.8; }
 .origin-editor { margin-top: 14px; padding: 12px; border: 1px solid #dfe6d5; border-radius: 8px; font-size: 11px; color: #586b4e; }
 .origin-editor summary { cursor: pointer; }
+.manual-places { margin-bottom: 18px; }
+.manual-places > h4 { margin: 0; font-size: 13px; }
+.manual-places .candidate-list { margin-top: 14px; }
+.manual-places .candidate-card p, .manual-places .candidate-card small { font-size: 11px; line-height: 1.9; }
 .origin-editor p, .poi-match p, .map-refresh-confirm p { margin-top: 8px; line-height: 1.9; }
 .origin-search-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
 .origin-editor input { font-size: 11px; padding: 7px 10px; }

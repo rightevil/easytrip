@@ -4,6 +4,16 @@ import type { Workspace } from './api';
 import { defaultPlanningBudget } from './planning-types';
 
 afterEach(() => vi.unstubAllGlobals());
+it('searches manual places with encoded city and query and confirms only a chosen POI and operation', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.searchManualPlace('trip / one', '店 A&B', '杭州市', 7);
+  const operation = { operation_id: 'same-operation', expected_version: 7, expected_workspace_version: 9, search_id: 'search', poi_id: 'poi-one', category: 'play' as const };
+  await api.confirmManualPlace('trip / one', operation);
+  expect(send.mock.calls[0][0]).toBe(`/api/trips/trip%20%2F%20one/places/manual/search?query=${encodeURIComponent('店 A&B')}&city=${encodeURIComponent('杭州市')}&expected_version=7`);
+  expect(send.mock.calls[1][0]).toBe('/api/trips/trip%20%2F%20one/places/manual/confirm');
+  expect(JSON.parse(send.mock.calls[1][1].body)).toEqual(operation);
+});
 it('omits the UI all-category sentinel and server-owned map confirmation fields at the API boundary', async () => {
   const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
   vi.stubGlobal('fetch', send);

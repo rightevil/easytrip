@@ -138,7 +138,7 @@ export function Planning({ session, archived }: { session: TripSession; archived
       const completed = constraint.state === 'completed';
       const protectedEdit = completed || constraint.locked;
       return <fieldset key={place.candidate_id} disabled={archived || tasks.busy} className="planning-activity">
-        <legend>{place.name}</legend><p>{place.poi.name} · {place.poi.address || '地址未知'} · {place.activities.length} 项来源活动</p>
+        <legend>{place.name}</legend><p>{place.poi.name} · {place.poi.address || '地址未知'} · {place.source === 'user' ? '用户指定，无攻略或评价证据' : `${place.activities.length} 项来源活动`}</p>
         {supplement && <p className="discovery-note">当前采用方案实际安排的补查餐饮；其默认停留仍为程序估计，餐次和营业待核实。</p>}
         <label>项目进度<select value={constraint.state} disabled={completed} onChange={event => change(place.candidate_id, { state: event.target.value as ActivityConstraint['state'] })}><option value="pending">未完成</option><option value="completed" disabled={!input?.active_plan_id || constraint.excluded}>已完成</option><option value="skipped" disabled={constraint.required || constraint.locked}>跳过</option></select></label>
         {completed && <p className="discovery-note">已完成项目的时间、费用与历史位置保留，不参与后缀替换。</p>}

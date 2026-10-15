@@ -3,12 +3,13 @@ import type { Message, Run, Trip, TripRequest, Workspace } from './api';
 import { Autosave } from './autosave';
 import { defaultDiscoveryBudget } from './discovery-types';
 import type { Candidate, DiscoveryBudget } from './discovery-types';
-import type { MapAction, OriginConfirmation, PlacesSnapshot } from './places-types';
+import type { ManualPlaceConfirmation, ManualPlaceSearch, MapAction, OriginConfirmation, PlacesSnapshot } from './places-types';
 import { defaultPlanningBudget } from './planning-types';
 import type { Plan, PlanningBudget, PlanningReplacement } from './planning-types';
 import { validCoordinate } from './amap';
 
 interface PlacesState { snapshot: PlacesSnapshot | null; busy: boolean; reading: boolean; error: string | null; focus: { candidate_id: string; sequence: number } | null }
+interface ManualPlaceState { query: string; city: string; category: Candidate['category']; search: ManualPlaceSearch | null; poiId: string | null; searching: boolean; operation: ManualPlaceConfirmation | null; error: string | null; savedName: string | null }
 
 interface ChatState {
   messages: Message[];
@@ -43,8 +44,12 @@ export class TripSession {
   private placesListeners = new Set<() => void>();
   private placesSequence = 0;
   private placesRunId: string | undefined;
+  private manualPlace: ManualPlaceState;
+  private manualPlaceListeners = new Set<() => void>();
+  private manualSearchSequence = 0;
   constructor(trip: Trip, private onSaved: (trip: Trip) => void) {
     this.trip = trip;
+    this.manualPlace = { query: '', city: trip.request.destination ?? '', category: 'play', search: null, poiId: null, searching: false, operation: null, error: null, savedName: null };
     this.chat = { messages: trip.messages, content: '', sending: false, retryPending: false, error: null, discoveryRequested: false };
     this.tasks = { runs: trip.runs, busy: false, operation: null, planAdoption: null, planningReplacement: null, error: null, discoveryBudget: { ...defaultDiscoveryBudget } };
     this.request = new Autosave({ name: trip.name, request: trip.request }, trip.request_version, async (draft, version) => {
@@ -70,7 +75,7 @@ export class TripSession {
   subscribePlaces = (listener: () => void) => { this.placesListeners.add(listener); return () => { this.placesListeners.delete(listener); }; };
   private updatePlaces(change: Partial<PlacesState>) { this.places = { ...this.places, ...change }; this.placesListeners.forEach(listener => listener()); }
   private async acceptPlaces(snapshot: PlacesSnapshot, keepDisplayedRun = false) {
-    if (snapshot.trip.id !== this.trip.id || snapshot.candidates.some(item => item.trip_id !== this.trip.id)) throw new Error('地点归属不一致，已阻止应用。');
+    if (snapshot.trip.id !== this.trip.id || [...snapshot.candidates, ...(snapshot.manual_candidates ?? [])].some(item => item.trip_id !== this.trip.id)) throw new Error('地点归属不一致，已阻止应用。');
     if (keepDisplayedRun && this.placesRunId && snapshot.run_id !== this.placesRunId) {
       const previous = this.places.snapshot?.run_id === this.placesRunId ? this.places.snapshot : null;
       snapshot = { ...snapshot, run_id: this.placesRunId, request_version: previous?.request_version ?? this.request.getSnapshot().version, candidates: previous?.candidates ?? [], matches: previous?.matches ?? [] };
@@ -107,12 +112,13 @@ export class TripSession {
     finally { if (sequence === this.placesSequence) this.updatePlaces({ reading: false }); }
   }
   private async changePlaces(send: (version: number, workspaceVersion: number) => Promise<PlacesSnapshot>) {
-    if (this.places.busy) return false;
+    if (this.places.busy || this.disposed) return false;
     this.placesSequence++;
     this.updatePlaces({ busy: true, error: null, reading: false });
     let displayedRun = this.placesRunId;
     try {
       await this.flush();
+      if (this.disposed) return false;
       const snapshot = await send(this.request.getSnapshot().version, this.workspace.getSnapshot().version);
       if (this.disposed) return false;
       await this.acceptPlaces(snapshot, true);
@@ -136,6 +142,56 @@ export class TripSession {
   }
   matchPlaces(runId: string) { return this.changePlaces((version, workspaceVersion) => api.matchPlaces(this.trip.id, version, workspaceVersion, runId)); }
   confirmPlace(candidateId: string, poiId: string) { return this.changePlaces((version, workspaceVersion) => api.confirmPlace(this.trip.id, candidateId, version, workspaceVersion, poiId)); }
+  getManualPlaceSnapshot = () => this.manualPlace;
+  subscribeManualPlace = (listener: () => void) => { this.manualPlaceListeners.add(listener); return () => { this.manualPlaceListeners.delete(listener); }; };
+  private updateManualPlace(change: Partial<ManualPlaceState>) { this.manualPlace = { ...this.manualPlace, ...change }; this.manualPlaceListeners.forEach(listener => listener()); }
+  editManualPlace(change: Partial<Pick<ManualPlaceState, 'query' | 'city' | 'category' | 'poiId'>>) {
+    if (this.manualPlace.operation || this.places.busy || this.disposed) return;
+    if (change.query !== undefined || change.city !== undefined) {
+      this.manualSearchSequence++;
+      this.updateManualPlace({ ...change, search: null, poiId: null, searching: false, error: null, savedName: null });
+    } else this.updateManualPlace({ ...change, error: null, savedName: null });
+  }
+  async searchManualPlace() {
+    const { query: rawQuery, city: rawCity } = this.manualPlace;
+    const query = rawQuery.trim(), city = rawCity.trim();
+    if (!query || query.length > 80 || !city || city.length > 100 || this.manualPlace.searching || this.manualPlace.operation || this.places.busy || this.disposed) return;
+    const sequence = ++this.manualSearchSequence;
+    this.updateManualPlace({ searching: true, search: null, poiId: null, error: null, savedName: null });
+    try {
+      await this.flush();
+      if (sequence !== this.manualSearchSequence || this.disposed) return;
+      const result = await api.searchManualPlace(this.trip.id, query, city, this.request.getSnapshot().version);
+      if (sequence !== this.manualSearchSequence || this.disposed) return;
+      if (result.request_version !== this.request.getSnapshot().version || result.query !== query || result.city !== city) throw new Error('地点搜索条件已改变，请重新搜索。');
+      this.updateManualPlace({ search: result });
+    } catch (error) { if (sequence === this.manualSearchSequence && !this.disposed) this.updateManualPlace({ error: error instanceof Error ? error.message : '地点搜索失败，输入已保留。' }); }
+    finally { if (sequence === this.manualSearchSequence && !this.disposed) this.updateManualPlace({ searching: false }); }
+  }
+  async confirmManualPlace() {
+    if (this.disposed || this.places.busy) return false;
+    const success = await this.changePlaces(async (version, workspaceVersion) => {
+      let operation = this.manualPlace.operation;
+      if (!operation) {
+        const { search, poiId, category } = this.manualPlace;
+        if (!search || search.request_version !== version || !search.items.some(item => item.id === poiId)) throw new Error('请选择当前搜索中的具体地点，条件改变后需要重新搜索。');
+        operation = { operation_id: crypto.randomUUID(), expected_version: version, expected_workspace_version: workspaceVersion, search_id: search.search_id, poi_id: poiId!, category };
+        this.updateManualPlace({ operation, error: null });
+      }
+      const snapshot = await api.confirmManualPlace(this.trip.id, operation);
+      if (!(snapshot.manual_candidates ?? []).some(item => item.id === snapshot.candidate_id && item.poi.id === operation.poi_id && item.category === operation.category)) throw new Error('手动候选保存结果未确认，请重试同一操作。');
+      return snapshot;
+    });
+    if (this.disposed) return false;
+    if (success) {
+      const selected = this.manualPlace.search?.items.find(item => item.id === this.manualPlace.poiId);
+      this.updateManualPlace({ search: null, poiId: null, operation: null, error: null, savedName: selected?.name ?? this.manualPlace.query.trim() });
+    } else this.updateManualPlace({ error: this.places.error ?? '候选尚未确认保存，输入已保留。' });
+    return success;
+  }
+  continueEditingManualPlace() {
+    if (!this.places.busy && !this.disposed) this.updateManualPlace({ operation: null, error: null });
+  }
   async mapAction(action: MapAction, candidateId?: string) {
     const saved = await this.changePlaces((version, workspaceVersion) => api.mapAction(this.trip.id, version, workspaceVersion, action, { ...(candidateId ? { candidate_id: candidateId } : {}), ...(action === 'refresh' ? { category: this.workspace.getSnapshot().value.category, city: this.workspace.getSnapshot().value.map_city ?? null } : {}) }));
     if (saved && candidateId && action === 'add') this.focusPlace(candidateId);
@@ -399,5 +455,5 @@ export class TripSession {
     if (requestCurrent) this.request.resolve({ name: trip.name, request: trip.request }, trip.request_version, false);
     if (workspaceCurrent) this.workspace.resolve(trip.workspace, trip.workspace_version, false);
   }
-  dispose() { this.disposed = true; this.request.dispose(); this.workspace.dispose(); this.chatListeners.clear(); this.taskListeners.clear(); this.placesListeners.clear(); }
+  dispose() { this.disposed = true; this.manualSearchSequence++; this.request.dispose(); this.workspace.dispose(); this.chatListeners.clear(); this.taskListeners.clear(); this.placesListeners.clear(); this.manualPlaceListeners.clear(); }
 }
