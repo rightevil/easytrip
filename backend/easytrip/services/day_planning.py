@@ -278,6 +278,9 @@ async def schedule(
                             "lodging_gap",
                             "这一晚尚无本行程已确认且明确绑定的酒店",
                             date=date,
+                            anchor=deepcopy(order[-1]["poi"] if order else origin),
+                            nights=1,
+                            price_status="unknown",
                         )
                     )
                 else:

@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from ..domain.planning import PLAN_STAGES, PlanPayload, SavePlan
 from ..integrations.amap import Amap, AmapBudgetExceeded, AmapError
 from ..services.day_planning import schedule
+from ..services.lodgings import supplement_lodgings
 from ..services.meals import supplement_meals
 from ..services.routes import RouteProvider
 from .discovery import DiscoveryRunner
@@ -162,6 +163,34 @@ class PlanningRunner(DiscoveryRunner):
                         else:
                             output = initial["suggestions"]
                             provider.cache_hits = initial["cache_hits"]
+                        lodgings = {"candidates": [], "gaps": [], "queries": []}
+                        if run["params"]["request"]["planning"].get("day_windows"):
+                            lodging_seconds = expires_at - monotonic() - 10
+                            if lodging_seconds > 0:
+                                try:
+                                    async with asyncio.timeout(lodging_seconds):
+                                        lodgings = await supplement_lodgings(
+                                            self,
+                                            run,
+                                            self.client,
+                                            run["params"],
+                                            output,
+                                            amap,
+                                        )
+                                except TimeoutError:
+                                    lodgings["gaps"].append(
+                                        {
+                                            "code": "lodging_lookup_timeout",
+                                            "message": "住宿补查达到时间预算，逐晚缺口保留",
+                                        }
+                                    )
+                            else:
+                                lodgings["gaps"].append(
+                                    {
+                                        "code": "lodging_lookup_budget",
+                                        "message": "剩余时间不足，住宿缺口保留",
+                                    }
+                                )
                         meals = {"candidates": [], "gaps": [], "queries": []}
                         # Reserve time to retain already obtained routes if meal lookup times out.
                         meal_seconds = expires_at - monotonic() - 10
@@ -233,11 +262,28 @@ class PlanningRunner(DiscoveryRunner):
                             )
                             suggestion["payload"]["supplements"] = list(
                                 {
-                                    item["candidate_id"]: item
-                                    for item in [*inherited_meals, *meals["candidates"]]
+                                    (
+                                        item["candidate_id"],
+                                        item.get("lodging_window", {}).get("date"),
+                                    ): item
+                                    for item in [
+                                        *inherited_meals,
+                                        *meals["candidates"],
+                                        *lodgings["candidates"],
+                                    ]
                                 }.values()
                             )
                             suggestion["payload"]["unknowns"].extend(meals["gaps"])
+                            suggestion["payload"]["unknowns"].extend(lodgings["gaps"])
+                            for day in suggestion["payload"].get("days", []):
+                                day["unknowns"].extend(
+                                    gap
+                                    for gap in lodgings["gaps"]
+                                    if gap.get("date") == day["date"]
+                                )
+                            suggestion["payload"]["usage"]["lodging_queries"] = (
+                                lodgings["queries"]
+                            )
                             suggestion["payload"]["usage"]["meal_queries"] = meals[
                                 "queries"
                             ]

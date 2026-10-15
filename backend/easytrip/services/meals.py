@@ -12,7 +12,7 @@ from ..agent.content import analysis_progress, note_hash, persist_extraction
 from ..agent.discovery import DiscoveryPaused, DiscoveryStopped
 from ..domain.discovery import CandidateDraft
 from ..domain.models import TripRequest
-from ..domain.places import Poi
+from ..domain.places import MatchPlaces, Poi
 from ..integrations.amap import AmapBudgetExceeded
 from .collection import CollectionService
 from .evidence import build_candidates, extract_note
@@ -44,10 +44,16 @@ def meal_queries(frozen, suggestions):
         payload = suggestion["payload"]
         for gap in payload.get("unknowns", []):
             period = gap.get("period")
+            local_date = (
+                _time(gap["window_start"]).astimezone(zone).date()
+                if gap.get("window_start")
+                else date
+            )
+            key = (local_date, period)
             if (
                 gap.get("code") != "meal_gap"
                 or period not in ("lunch", "dinner")
-                or period in seen
+                or key in seen
             ):
                 continue
             opening, closing = (11, 14) if period == "lunch" else (17, 20)
@@ -55,14 +61,14 @@ def meal_queries(frozen, suggestions):
                 request.start_at,
                 _time(gap["window_start"])
                 if gap.get("window_start")
-                else datetime.combine(date, time(opening), zone),
+                else datetime.combine(local_date, time(opening), zone),
                 request.planning.progress_at or request.start_at,
             )
             end = min(
                 deadline,
                 _time(gap["window_end"])
                 if gap.get("window_end")
-                else datetime.combine(date, time(closing), zone),
+                else datetime.combine(local_date, time(closing), zone),
             )
             if start >= end:
                 continue
@@ -74,6 +80,7 @@ def meal_queries(frozen, suggestions):
                 and item.get("start_at")
                 and item.get("candidate_id") in selected
                 and _time(item["start_at"]) < end
+                and _time(item["start_at"]).astimezone(zone).date() == local_date
             ]
             if not located:
                 continue
@@ -91,7 +98,7 @@ def meal_queries(frozen, suggestions):
             query = f"{poi.city} {poi.name} 附近 {meal} {start.astimezone(zone):%H:%M}-{end.astimezone(zone):%H:%M} 餐馆"
             if len(query) > 120:
                 continue
-            seen.add(period)
+            seen.add(key)
             result.append(
                 {
                     "query": query,
@@ -121,6 +128,14 @@ def _nearby(left, right):
 
 
 def _gap(context, reason, message):
+    if context.get("purpose") == "lodging_gap":
+        return {
+            "code": "lodging_supplement_unfilled",
+            "reason": reason,
+            "message": message,
+            "date": context["date"],
+            "anchor": {"name": context["anchor_name"], "city": context["city"]},
+        }
     return {
         "code": "meal_supplement_unfilled",
         "reason": reason,
@@ -135,11 +150,18 @@ def _gap(context, reason, message):
 
 async def supplement_meals(runner, run, client, frozen, suggestions, amap):
     """Return separate supplements; never mutate user selection or its input hash."""
-    contexts = meal_queries(frozen, suggestions)
+    return await _supplement_places(
+        runner, run, client, frozen, amap, meal_queries(frozen, suggestions), "eat"
+    )
+
+
+async def _supplement_places(runner, run, client, frozen, amap, contexts, category):
+    prefix = "meals" if category == "eat" else "lodgings"
+    label = "餐饮" if category == "eat" else "住宿"
     result = {"queries": contexts, "candidates": [], "gaps": []}
     if not contexts:
         return result
-    cached = await runner.db("get_run_item", run["id"], "meals:result")
+    cached = await runner.db("get_run_item", run["id"], prefix + ":result")
     if cached is not None:
         await analysis_progress(runner, run)
         return cached
@@ -152,7 +174,11 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
         )
     ):
         result["gaps"] = [
-            _gap(context, "configuration_missing", "来源或模型未配置，餐饮缺口保持可见")
+            _gap(
+                context,
+                "configuration_missing",
+                f"来源或模型未配置，{label}缺口保持可见",
+            )
             for context in contexts
         ]
         return result
@@ -239,7 +265,11 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                 )
             if not record or record.get("status") != "ready":
                 result["gaps"].append(
-                    _gap(context, "note_unreadable", "笔记详情未成功取得，未生成餐厅")
+                    _gap(
+                        context,
+                        "note_unreadable",
+                        f"笔记详情未成功取得，未生成{label}候选",
+                    )
                 )
                 continue
             note = record["note"]
@@ -299,7 +329,7 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                     _gap(
                         context,
                         "model_output_invalid",
-                        "模型未返回通过来源校验的餐饮抽取",
+                        f"模型未返回通过来源校验的{label}抽取",
                     )
                 )
                 continue
@@ -312,7 +342,7 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
             drafts = [
                 item
                 for item in build_candidates([extraction], sources)
-                if item["category"] == "eat" and item["kind"] == "place"
+                if item["category"] == category and item["kind"] == "place"
             ]
             found = False
             for draft in drafts[:2]:
@@ -322,7 +352,7 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                         "id": str(
                             uuid5(
                                 NAMESPACE_URL,
-                                f"p4-meal:{run['id']}:{draft['name']}:{','.join(draft['mention_ids'])}",
+                                f"{'p4-meal' if category == 'eat' else 'p5-lodging'}:{run['id']}:{draft['name']}:{','.join(draft['mention_ids'])}",
                             )
                         ),
                     }
@@ -368,8 +398,15 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                 poi = Poi.model_validate(
                     runner.settings.redact(verified["poi"])
                 ).model_dump(mode="json")
-                if poi["id"] in used_pois or not _nearby(
+                if (category == "eat" and poi["id"] in used_pois) or not _nearby(
                     context["anchor_location"], poi["location"]
+                ):
+                    continue
+                if category == "stay" and (
+                    not poi.get("address")
+                    or not poi.get("city")
+                    or poi["city"].removesuffix("市")
+                    != context["city"].removesuffix("市")
                 ):
                     continue
                 if (
@@ -383,6 +420,28 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                     is None
                 ):
                     raise DiscoveryStopped("run_changed")
+                if category == "stay":
+                    trip = await runner.db("get_trip", run["trip_id"])
+                    body = MatchPlaces(
+                        expected_version=run["request_version"],
+                        expected_workspace_version=trip["workspace_version"],
+                        run_id=run["id"],
+                        candidate_ids=[candidate["id"]],
+                    )
+                    session = await runner.db("begin_place_match", run["trip_id"], body)
+                    await runner.db(
+                        "finish_place_match",
+                        run["trip_id"],
+                        body,
+                        session,
+                        {
+                            candidate["id"]: {
+                                "status": "unique",
+                                "poi": poi,
+                                "reason": "住宿补查已核对具体分店与区域",
+                            }
+                        },
+                    )
                 evidence = [
                     item
                     for item in data["evidence"]
@@ -400,7 +459,7 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                     {
                         "candidate_id": candidate["id"],
                         "name": candidate["name"],
-                        "category": "eat",
+                        "category": category,
                         "kind": "place",
                         "city": poi["city"],
                         "run_id": run["id"],
@@ -418,24 +477,41 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                             for source in sources
                             if source["id"] in source_ids
                         ],
-                        "meal_window": {
-                            key: context[key]
-                            for key in (
-                                "period",
-                                "start_at",
-                                "end_at",
-                                "anchor_candidate_id",
-                            )
-                        },
-                        "constraint": {
-                            "candidate_id": candidate["id"],
-                            "duration_minutes": 45,
-                            "duration_source": "estimated",
-                            "cost_cny": None,
-                            "cost_source": "unknown",
-                            "not_before": context["start_at"],
-                            "not_after": context["end_at"],
-                        },
+                        **(
+                            {
+                                "lodging_window": {
+                                    key: context[key]
+                                    for key in (
+                                        "date",
+                                        "anchor_candidate_id",
+                                        "anchor_name",
+                                        "anchor_location",
+                                        "city",
+                                    )
+                                }
+                            }
+                            if category == "stay"
+                            else {
+                                "meal_window": {
+                                    key: context[key]
+                                    for key in (
+                                        "period",
+                                        "start_at",
+                                        "end_at",
+                                        "anchor_candidate_id",
+                                    )
+                                },
+                                "constraint": {
+                                    "candidate_id": candidate["id"],
+                                    "duration_minutes": 45,
+                                    "duration_source": "estimated",
+                                    "cost_cny": None,
+                                    "cost_source": "unknown",
+                                    "not_before": context["start_at"],
+                                    "not_after": context["end_at"],
+                                },
+                            }
+                        ),
                     }
                 )
                 used_pois.add(poi["id"])
@@ -446,32 +522,37 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
                     _gap(
                         context,
                         "poi_not_confirmed",
-                        "未取得区域内唯一可核对餐饮POI；歧义分店未自动采用",
+                        f"未取得区域内唯一可核对{label}POI；歧义分店未自动采用",
                     )
                 )
         except sqlite3.Error:
             raise
         except Exception as error:
             reason = (
-                "budget_exhausted"
+                "model_result_unknown"
+                if isinstance(error, DiscoveryPaused)
+                else "budget_exhausted"
                 if isinstance(error, (DiscoveryStopped, AmapBudgetExceeded))
                 else "source_or_model_unavailable"
             )
             result["gaps"].append(
-                _gap(context, reason, "有限补查未完成，原餐次缺口保持可见")
+                _gap(context, reason, f"有限补查未完成，原{label}缺口保持可见")
             )
             for pending in contexts[contexts.index(context) + 1 :]:
                 result["gaps"].append(
                     _gap(
                         pending,
                         "supplement_stopped",
-                        "前一餐次补查停止，未重复外部请求",
+                        "前一项补查停止，未重复外部请求",
                     )
                 )
             break
-    if frozen["request"].get("planning", {}).get("dietary_restrictions") or re.search(
-        r"过敏|忌口|素食|无麸质|不耐受|不吃|不能吃",
-        frozen["request"].get("preferences", ""),
+    if category == "eat" and (
+        frozen["request"].get("planning", {}).get("dietary_restrictions")
+        or re.search(
+            r"过敏|忌口|素食|无麸质|不耐受|不吃|不能吃",
+            frozen["request"].get("preferences", ""),
+        )
     ):
         result["gaps"].append(
             {
@@ -480,6 +561,6 @@ async def supplement_meals(runner, run, client, frozen, suggestions, amap):
             }
         )
     await runner.db(
-        "save_run_item", run["id"], run["generation"], "meals:result", result
+        "save_run_item", run["id"], run["generation"], prefix + ":result", result
     )
     return result

@@ -354,3 +354,38 @@ def test_unassigned_second_night_stays_missing_even_with_confirmed_hotel_in_pool
         )
         assert response.status_code == 409
         assert client.get(url).json()["active_plan_id"] is None
+
+
+def test_lodging_suggestion_only_becomes_a_dated_stay_after_explicit_edit_and_replanning(
+    workspace,
+):
+    open_client, pois, calls = workspace
+    with open_client() as client:
+        url, identifiers, windows = prepare(client, pois, 3, missing_last_hotel=True)
+        first, _ = plan(client, url, calls)
+        suggestions = [
+            item for item in first["payload"]["supplements"] if "lodging_window" in item
+        ]
+        assert len(suggestions) == 1
+        suggestion = suggestions[0]
+        assert suggestion["lodging_window"]["date"] == windows[1]["date"]
+        assert first["status"] == "partial"
+        assert client.get(url).json()["request"]["planning"]["overnight_stays"] == [
+            {"date": windows[0]["date"], "candidate_id": identifiers["hotel-1"]}
+        ]
+        request = client.get(url).json()["request"]
+        request["planning"]["overnight_stays"].append(
+            {"date": windows[1]["date"], "candidate_id": suggestion["candidate_id"]}
+        )
+        patch_request(client, url, request)
+        second, _ = plan(client, url, calls, parent=first["id"])
+        assert second["status"] == "conditional"
+        assert (
+            second["payload"]["days"][1]["lodging_candidate_id"]
+            == suggestion["candidate_id"]
+        )
+        assert (
+            second["payload"]["days"][2]["origin"]["poi_id"] == suggestion["poi"]["id"]
+        )
+        assert adopt(client, url, second)["trip"]["active_plan_id"] == second["id"]
+        assert client.get(url + f"/plans/{first['id']}").json() == first

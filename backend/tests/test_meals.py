@@ -136,6 +136,7 @@ def install_sources(
     model_unknown=False,
     repair=False,
     comment_evidence=False,
+    category="eat",
 ):
     calls = {"queries": [], "comment_limits": [], "extract_comments": [], "models": 0}
 
@@ -182,7 +183,7 @@ def install_sources(
             limit = self.budget["comment_limit"]
             calls["comment_limits"].append(limit)
             identity = feeds[0]["external_id"]
-            name = f"餐馆{identity}(孤山店)"
+            name = f"{'酒店' if category == 'stay' else '餐馆'}{identity}(孤山店)"
             action = await self.runner.db(
                 "begin_action",
                 self.run["id"],
@@ -271,7 +272,7 @@ def install_sources(
             "source_id": source,
             "name": note["title"],
             "city": "杭州",
-            "category": "eat",
+            "category": category,
             "quote": note["text"],
         }
         data = {

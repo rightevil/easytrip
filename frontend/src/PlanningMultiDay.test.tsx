@@ -156,7 +156,7 @@ it('keeps a missing night and the next unknown origin visible instead of falling
   vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
   render(<Planning session={session} archived={false} />);
   expect(await screen.findByText('2026-10-15 晚缺少已核对酒店；翌日起点与住宿接驳仍未知。')).toBeTruthy();
-  expect(screen.getByText('10月15日晚酒店缺口')).toBeTruthy();
+  expect(screen.getByText('2026-10-15 · 10月15日晚酒店缺口')).toBeTruthy();
   await userEvent.selectOptions(screen.getByLabelText('查看日计划'), '2026-10-16');
   expect(screen.getByText(/当日出发：未知，不能确认接驳/)).toBeTruthy();
   expect(screen.getByText('前一晚酒店未明确，接驳未知')).toBeTruthy();
@@ -187,4 +187,36 @@ it('opens older P4 plans without days and makes archived multi-day fields read-o
   expect(screen.getByRole('button', { name: '添加下一日日窗' }).matches(':disabled')).toBe(true);
   expect(screen.getByLabelText('本晚酒店候选').matches(':disabled')).toBe(true);
   expect(screen.getByLabelText('活动安排日期').matches(':disabled')).toBe(true);
+});
+
+it('binds a dated lodging suggestion explicitly, preserving the other night and sources without starting planning', async () => {
+  beginMultiDay();
+  const value = dailyPlan(); value.status = 'partial';
+  value.payload.supplements = [hotelA, hotelB].map((hotel, index) => ({ ...hotel, category: 'stay', sources: [{ title: '往年入住记录', text: '去年房价不表示今日可订。' }], lodging_window: { date: `2026-10-${15 + index}`, city: '杭州市', anchor_name: '当日活动', anchor_location: [120.1, 30.2], anchor_candidate_id: 'activity-a' } }));
+  vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
+  render(<Planning session={session} archived={false} />);
+  const first = within(await screen.findByRole('region', { name: '2026-10-15 晚住宿建议' }));
+  expect(first.getByText(/历史价格不是当晚可订房价/)).toBeTruthy();
+  expect(first.getByText('去年房价不表示今日可订。')).toBeTruthy();
+  await userEvent.click(first.getByRole('button', { name: '选择为这一晚酒店' }));
+  await act(async () => { await session.flush(); });
+  expect(session.request.getSnapshot().value.request.planning?.overnight_stays).toEqual([{ date: '2026-10-15', candidate_id: 'hotel-a' }]);
+  await userEvent.selectOptions(screen.getByLabelText('查看日计划'), '2026-10-16');
+  const second = within(await screen.findByRole('region', { name: '2026-10-16 晚住宿建议' }));
+  await userEvent.click(second.getByRole('button', { name: '选择为这一晚酒店' }));
+  await act(async () => { await session.flush(); });
+  expect(session.request.getSnapshot().value.request.planning?.overnight_stays).toEqual([{ date: '2026-10-15', candidate_id: 'hotel-a' }, { date: '2026-10-16', candidate_id: 'hotel-b' }]);
+  expect(api.startPlanning).not.toHaveBeenCalled();
+  expect(session.workspace.getSnapshot().value.selected_ids).toEqual(['activity-a']);
+});
+
+it('keeps lodging suggestions read-only when their exact POI is unavailable', async () => {
+  beginMultiDay(2);
+  input.lodging_candidates = [];
+  const value = dailyPlan(2); value.payload.supplements = [{ ...hotelA, category: 'stay', lodging_window: { date: '2026-10-15', city: '杭州市', anchor_name: '公园', anchor_location: [120.1, 30.2], anchor_candidate_id: 'activity-a' } }];
+  vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
+  render(<Planning session={session} archived={false} />);
+  const region = within(await screen.findByRole('region', { name: '2026-10-15 晚住宿建议' }));
+  expect(region.getByRole('button', { name: '选择为这一晚酒店' }).matches(':disabled')).toBe(true);
+  expect(api.update).not.toHaveBeenCalled();
 });
