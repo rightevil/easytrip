@@ -2,9 +2,10 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
-from ..domain.planning import AdoptPlan, ReplacePlanningCandidate
+from ..domain.planning import AdoptPlan, ReplacePlanningCandidate, SearchRailTimetable
+from ..integrations.rail import RailError, search_rail
 from .trips import _call
 
 
@@ -14,6 +15,48 @@ def make_router():
     @router.get("/{trip_id}/planning-input")
     def inputs(trip_id: str, request: Request):
         return _call(request, "planning_input", trip_id)
+
+    @router.post("/{trip_id}/rail/search")
+    async def rail_search(trip_id: str, body: SearchRailTimetable, request: Request):
+        snapshot = _call(request, "rail_search_input", trip_id, body)
+        settings = request.app.state.settings
+        http = getattr(request.app.state, "http", None)
+        if not settings.rail_mcp or http is None:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "rail_unavailable",
+                    "message": "12306 MCP 未配置或暂不可用",
+                },
+            )
+        try:
+            result = await search_rail(
+                settings.rail_mcp,
+                http,
+                date=body.date,
+                departure_name=snapshot["departure_poi"]["name"],
+                arrival_name=snapshot["arrival_poi"]["name"],
+            )
+        except RailError as error:
+            raise HTTPException(
+                502, detail={"code": "rail_query_failed", "message": str(error)}
+            ) from None
+        if _call(request, "rail_search_input", trip_id, body) != snapshot:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "rail_query_stale",
+                    "message": "车站已改变，请重新查询班次",
+                },
+            )
+        return {
+            **result,
+            **{
+                key: value
+                for key, value in snapshot.items()
+                if key not in {"departure_poi", "arrival_poi"}
+            },
+        }
 
     @router.get("/{trip_id}/planning-replacements")
     def replacements(trip_id: str, request: Request):

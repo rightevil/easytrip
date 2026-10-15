@@ -18,6 +18,7 @@ EXPORT_DIR = ROOT_DIR / "reports" / "p0"
 @dataclass(repr=False)
 class Settings:
     xhs_mcp: str = ""
+    rail_mcp: str = ""
     amap_web_key: str = ""
     amap_js_key: str = ""
     amap_js_secure_key: str = ""
@@ -42,6 +43,7 @@ class Settings:
             }
         )
         aliases = {
+            "rail_mcp": "12306_MCP",
             "model_base_url": "AGNES_URL",
             "model_api_key": "AGNES_KEY",
             "model_id": "AGNES_MODEL",

@@ -25,6 +25,37 @@ def planning_hash(value):
 
 
 class PlanningStore:
+    def rail_search_input(self, trip_id, body):
+        from .database import OperationConflict
+
+        with self.connection() as connection:
+            connection.execute("BEGIN")
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            self._version(trip, body.expected_version)
+            stations = []
+            for identifier in (body.departure_station_id, body.arrival_station_id):
+                place = self._planning_place(
+                    connection, trip_id, identifier, category=None
+                )
+                if place is None or not any(
+                    kind in (place["poi"].get("type") or "")
+                    for kind in ("火车站", "铁路客运")
+                ):
+                    raise OperationConflict("请选择本行程已确认的具体火车站")
+                stations.append(place["poi"])
+            if stations[0]["id"] == stations[1]["id"]:
+                raise OperationConflict("铁路出发站和到达站不能是同一地点")
+            return {
+                "trip_id": trip_id,
+                "request_version": trip["request_version"],
+                "date": body.date.isoformat(),
+                "departure_station_id": body.departure_station_id,
+                "arrival_station_id": body.arrival_station_id,
+                "departure_poi": stations[0],
+                "arrival_poi": stations[1],
+            }
+
     def _freeze_planning_place(self, connection, trip_id, candidate, mentions, poi):
         mention_ids = {item["id"] for item in mentions}
         activities = [

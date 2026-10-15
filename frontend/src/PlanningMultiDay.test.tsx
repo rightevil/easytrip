@@ -283,3 +283,22 @@ it('saves user-known hotel times and nightly total for only that night and clear
   expect(session.request.getSnapshot().value.request.planning?.overnight_stays).toEqual([{ date: '2026-10-15', candidate_id: 'hotel-b' }]);
   expect(api.startPlanning).not.toHaveBeenCalled();
 });
+
+it('saves dirty railway conditions before querying and persists only the user-selected unconfirmed timetable', async () => {
+  trip.request.planning!.rail_segments = [{ id: 'outbound', date: '2026-10-15', departure_station_id: 'station-a', arrival_station_id: 'station-b', train_number: null, departure_at: null, arrival_at: null, confirmed: false, source: 'user', boarding_buffer_minutes: 30, arrival_buffer_minutes: 20, cost_cny: null }];
+  input.request = structuredClone(trip.request); input.planning = structuredClone(trip.request.planning!);
+  input.station_candidates = ['station-a', 'station-b'].map(id => ({ ...place(id), poi: { ...place(id).poi, type: '交通设施服务;火车站' } }));
+  session.dispose(); session = new TripSession(structuredClone(trip), () => {});
+  const search = vi.spyOn(api, 'searchRail').mockImplementation(async (id, query) => ({ source: '12306_mcp', trip_id: id, request_version: query.expected_version, date: query.date, departure_station_id: query.departure_station_id, arrival_station_id: query.arrival_station_id, queried_at: timestamp, departure_station: { name: 'station-a', code: 'AAA' }, arrival_station: { name: 'station-b', code: 'BBB' }, matched_count: 1, excluded_other_station_count: 0, items: [{ train_number: 'D123', departure_at: '2026-10-16T10:00:00+08:00', arrival_at: '2026-10-16T11:00:00+08:00', duration_minutes: 60, seats: [{ name: '二等座', remaining: '有', price_cny: 50 }] }] }));
+  render(<Planning session={session} archived={false} />);
+  await screen.findByRole('group', { name: 'activity-a' });
+  fireEvent.change(screen.getByLabelText('此铁路段出发日期'), { target: { value: '2026-10-16' } });
+  await userEvent.click(screen.getByRole('button', { name: '查询 12306 车次与余票' }));
+  await screen.findByRole('button', { name: '选用 D123 为待确认草稿' });
+  expect(search).toHaveBeenCalledWith('one', { expected_version: 2, date: '2026-10-16', departure_station_id: 'station-a', arrival_station_id: 'station-b' });
+  expect(vi.mocked(api.update).mock.invocationCallOrder[0]).toBeLessThan(search.mock.invocationCallOrder[0]);
+  await userEvent.click(screen.getByRole('button', { name: '选用 D123 为待确认草稿' }));
+  await act(async () => { await session.flush(); });
+  expect(trip.request.planning!.rail_segments![0]).toMatchObject({ train_number: 'D123', departure_at: '2026-10-16T10:00:00+08:00', arrival_at: '2026-10-16T11:00:00+08:00', confirmed: false, cost_cny: null });
+  expect(api.startPlanning).not.toHaveBeenCalled();
+});

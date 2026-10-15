@@ -4,6 +4,15 @@ import type { Workspace } from './api';
 import { defaultPlanningBudget } from './planning-types';
 
 afterEach(() => vi.unstubAllGlobals());
+it('queries the server railway MCP with only saved conditions and concrete station IDs', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  const query = { expected_version: 7, date: '2026-10-15', departure_station_id: 'departure', arrival_station_id: 'arrival' };
+  await api.searchRail('trip / one', query);
+  expect(send.mock.calls[0][0]).toBe('/api/trips/trip%20%2F%20one/rail/search');
+  expect(send.mock.calls[0][1].method).toBe('POST');
+  expect(JSON.parse(send.mock.calls[0][1].body)).toEqual(query);
+});
 it('searches manual places with encoded city and query and confirms only a chosen POI and operation', async () => {
   const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
   vi.stubGlobal('fetch', send);

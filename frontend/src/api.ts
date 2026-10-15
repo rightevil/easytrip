@@ -105,6 +105,7 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
 }
 
 export const api = {
+  searchRail: (id: string, query: RailSearchQuery) => call<RailSearchResult>(`/trips/${encodeURIComponent(id)}/rail/search`, 'POST', query),
   startPlanning: (id: string, operation_id: string, expected_version: number, budget: PlanningBudget, parent_plan_id?: string) => call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { kind: 'plan', operation_id, expected_version, budget, ...(parent_plan_id ? { parent_plan_id } : {}) }),
   planningInput: (id: string) => call<PlanningInput>(`/trips/${encodeURIComponent(id)}/planning-input`),
   planningReplacements: (id: string) => call<PlanningReplacements>(`/trips/${encodeURIComponent(id)}/planning-replacements`),
@@ -161,4 +162,4 @@ export const api = {
 };
 import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
 import type { ConfirmedOrigin, ManualPlaceConfirmation, ManualPlaceSearch, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
-import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningReplacement, PlanningReplacements, PlanningResult } from './planning-types';
+import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningReplacement, PlanningReplacements, PlanningResult, RailSearchQuery, RailSearchResult } from './planning-types';

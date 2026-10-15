@@ -125,3 +125,11 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 - `payload.days` 保存当日起终点、窗口、住宿、活动、交通与问题，平坦 `itinerary` 仍保持逐项一致。`kind:rail` 使用用户确认时刻及两站资料，不伪装成高德 `RouteLeg`。跨午夜用 `overnight_rail_id/continuing_rail_id` 连接在途和到达日。
 - 住宿补查候选带 `lodging_window`（`date/anchor_candidate_id/anchor_name/anchor_location/city`），与餐饮共用 Run 预算，来源/POI 保存后仍须用户明确逐晚绑定并重排。房态、实时价格、办理时长和行李寄存未知时保留待核实项。
 - 重新规划按日比较语义输入，保留未受影响的日期和有效前缀；已完成/锁定和过去酒店/铁路不允许静默改写。执行中进度只接受当前采用父方案，历史交通计划的实际执行与费用没有确认时仍未知。采用继续核验版本、签名、有效期、逐日连续性、真实站点、时刻与缓冲。
+
+## 真实 12306 MCP 查询（用户追加）
+
+`POST /api/trips/{id}/rail/search` 接收 `{expected_version,date,departure_station_id,arrival_station_id}`。两端必须是该行程已唯一核对的具体火车站候选 ID；不接收调用方传入的 MCP 地址或站名。归档、跨行程、旧条件、同站、非车站均拒绝，返回前再次核对条件与两站 POI，晚到结果不会写入行程。
+
+响应含 `trip_id/request_version/date`、两端候选 ID、`source:12306_mcp`、`queried_at`、两端 `{name,code}`、`matched_count/excluded_other_station_count` 与最多 20 个 `items`。每项含 `train_number/departure_at/arrival_at/duration_minutes/seats`；座席为 `{name,remaining,price_cny}`，价格未知为 null。上游可能返回同城其他站，服务端精确过滤并返回计数；未返回所选两站结果不等于该线路不存在。
+
+未配置 `12306_MCP` 返回 503；连接、schema、业务错误或时刻不一致返回 502；归属/归档/版本改变返回 404/409；输入非法返回 422。参数 schema 会核对，不解析外部引用；只调用 `get-station-code-by-names` 与 `get-tickets`，没有购票工具。单次最多 60 秒、无自动重试。查询只读；用户选定后通过原行程修改接口保存 `source:user,confirmed:false`，显式确认后才参与 P5 校验，不把 MCP 查询视为购票、准点或实际支出证明。

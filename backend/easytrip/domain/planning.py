@@ -7,9 +7,30 @@ from uuid import UUID
 from pydantic import Field, model_serializer, model_validator
 
 from .discovery_tasks import DiscoveryBudget, DiscoveryUsage
-from .models import ConfirmedOrigin, DayWindow, Identifier, Model, TripRequest, Version
+from .models import (
+    ConfirmedOrigin,
+    DayWindow,
+    Identifier,
+    LocalDate,
+    Model,
+    TripRequest,
+    Version,
+)
 
 PLAN_STAGES = ("planning_input", "routing", "scheduled")
+
+
+class SearchRailTimetable(Model):
+    expected_version: Version
+    date: LocalDate
+    departure_station_id: Identifier
+    arrival_station_id: Identifier
+
+    @model_validator(mode="after")
+    def distinct_stations(self):
+        if self.departure_station_id == self.arrival_station_id:
+            raise ValueError("铁路出发站和到达站不能相同")
+        return self
 
 
 class PlanningBudget(DiscoveryBudget):

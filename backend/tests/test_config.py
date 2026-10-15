@@ -54,6 +54,21 @@ def test_environment_model_settings_override_dotenv_aliases(monkeypatch, tmp_pat
     assert settings.model_id == "selected-model"
 
 
+def test_rail_alias_is_loaded_and_redacted(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(config, "BACKEND_DIR", tmp_path / "backend")
+    monkeypatch.setattr(config.os, "environ", {})
+    address = "http://127.0.0.1:18061/mcp?token=rail-secret"
+    (tmp_path / ".env").write_text(f"12306_MCP={address}\n", encoding="utf-8")
+    settings = Settings.load()
+    assert settings.rail_mcp == address
+    assert address in settings.secrets
+    assert settings.redact(address) == "[REDACTED]"
+    assert "rail-secret" not in repr(settings)
+    monkeypatch.setattr(config.os, "environ", {"RAIL_MCP": "http://localhost:1234/mcp"})
+    assert Settings.load().rail_mcp == "http://localhost:1234/mcp"
+
+
 def test_redact_keeps_usage_and_removes_credentials_urls_and_contact_data():
     settings = Settings(secrets={"web-secret", "model-secret"})
     payload = {
