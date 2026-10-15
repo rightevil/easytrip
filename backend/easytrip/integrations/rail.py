@@ -1,11 +1,13 @@
 """One bounded, read-only HTTP MCP session for exact-station railway queries."""
 
 import asyncio
+import hashlib
 import json
 import math
 import re
 from datetime import date as Date
 from datetime import datetime, time, timedelta, timezone
+from time import monotonic
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -142,7 +144,14 @@ def _ticket(row, query_date, departure, arrival):
 
 
 async def search_rail(
-    url, client, *, date: Date, departure_name: str, arrival_name: str
+    url,
+    client,
+    *,
+    date: Date,
+    departure_name: str,
+    arrival_name: str,
+    before_call=None,
+    after_call=None,
 ):
     """Use a direct_client; no service startup, retries, booking or automatic adoption."""
     departure_name, arrival_name = (
@@ -153,6 +162,7 @@ async def search_rail(
         raise RailError("出发站和到达站不能相同")
     if type(date) is not Date:
         raise RailError("请选择有效的乘车日期")
+    hook_error = None
     try:
         validate_url(url)
         async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
@@ -164,7 +174,7 @@ async def search_rail(
                 async with ClientSession(
                     read, write, read_timeout_seconds=timedelta(seconds=45)
                 ) as session:
-                    await session.initialize()
+                    initialized = await session.initialize()
                     page = await session.list_tools()
                     tools = {
                         tool.name: tool for tool in page.tools if tool.name in READ_ONLY
@@ -172,7 +182,8 @@ async def search_rail(
                     if not READ_ONLY.issubset(tools):
                         raise RailError("12306 MCP 缺少站名或余票查询工具")
 
-                    async def call(name, arguments):
+                    async def call(name, arguments, parse):
+                        nonlocal hook_error
                         if name not in READ_ONLY:
                             raise RailError("铁路工具不在只读白名单")
                         try:
@@ -181,17 +192,126 @@ async def search_rail(
                             raise RailError(
                                 "12306 MCP 工具参数定义包含不可解析的引用"
                             ) from None
-                        return _result_json(await session.call_tool(name, arguments))
+                        metadata = {
+                            "schema_fingerprint": hashlib.sha256(
+                                json.dumps(
+                                    tools[name].inputSchema,
+                                    sort_keys=True,
+                                    ensure_ascii=False,
+                                ).encode("utf-8")
+                            ).hexdigest()
+                        }
+                        version = getattr(initialized, "protocolVersion", None)
+                        if isinstance(version, str):
+                            metadata["api_version"] = version
+                        server_version = getattr(
+                            getattr(initialized, "serverInfo", None), "version", None
+                        )
+                        if isinstance(server_version, str):
+                            metadata["server_version"] = server_version
+                        action_id = None
+                        if before_call is not None:
+                            try:
+                                action_id = await before_call(name)
+                            except Exception as error:
+                                hook_error = error
+                                raise
+                        started = monotonic()
+                        status = "unknown"
+                        cancelled = False
+                        try:
+                            result = await session.call_tool(name, arguments)
+                            try:
+                                data = parse(_result_json(result))
+                            except (
+                                RailError,
+                                ValueError,
+                                TypeError,
+                                KeyError,
+                                OverflowError,
+                            ):
+                                status = "failed"
+                                raise
+                            status = "completed"
+                            return data
+                        except asyncio.CancelledError:
+                            cancelled = True
+                            raise
+                        finally:
+                            if after_call is not None and action_id is not None:
+                                try:
+                                    await after_call(
+                                        action_id,
+                                        status=status,
+                                        elapsed_seconds=monotonic() - started,
+                                        metadata=metadata,
+                                    )
+                                except Exception as error:
+                                    if not cancelled:
+                                        hook_error = error
+                                        raise
 
-                    stations = await call(
+                    def parse_stations(stations):
+                        departure = _station(stations, departure_name)
+                        arrival = _station(stations, arrival_name)
+                        if departure["code"] == arrival["code"]:
+                            raise RailError("出发站和到达站不能相同")
+                        return departure, arrival
+
+                    departure, arrival = await call(
                         "get-station-code-by-names",
                         {"stationNames": f"{departure_name}|{arrival_name}"},
+                        parse_stations,
                     )
-                    departure = _station(stations, departure_name)
-                    arrival = _station(stations, arrival_name)
-                    if departure["code"] == arrival["code"]:
-                        raise RailError("出发站和到达站不能相同")
-                    rows = await call(
+
+                    def parse_tickets(rows):
+                        if not isinstance(rows, list) or len(rows) > 2000:
+                            raise RailError("12306 MCP 余票结果格式不正确")
+                        try:
+                            items = []
+                            for row in rows:
+                                if not isinstance(row, dict) or any(
+                                    not isinstance(row.get(key), str)
+                                    or not row[key].strip()
+                                    for key in (
+                                        "from_station",
+                                        "to_station",
+                                        "from_station_telecode",
+                                        "to_station_telecode",
+                                    )
+                                ):
+                                    raise ValueError
+                                for prefix, station in (
+                                    ("from", departure),
+                                    ("to", arrival),
+                                ):
+                                    if (
+                                        row[f"{prefix}_station"] == station["name"]
+                                    ) != (
+                                        row[f"{prefix}_station_telecode"]
+                                        == station["code"]
+                                    ):
+                                        raise ValueError
+                                # 12306 may include other stations in the same cities.
+                                if (
+                                    row["from_station_telecode"] != departure["code"]
+                                    or row["to_station_telecode"] != arrival["code"]
+                                ):
+                                    continue
+                                items.append(_ticket(row, date, departure, arrival))
+                        except (KeyError, TypeError, ValueError, OverflowError):
+                            raise RailError(
+                                "12306 MCP 车次的站点、时间或票价信息不一致"
+                            ) from None
+                        return {
+                            "matched_count": len(items),
+                            "excluded_other_station_count": len(rows) - len(items),
+                            "items": sorted(
+                                items, key=lambda item: item["departure_at"]
+                            )[:20],
+                        }
+
+                    tickets = await call(
                         "get-tickets",
                         {
                             "date": date.isoformat(),
@@ -201,52 +321,14 @@ async def search_rail(
                             "limitedNum": 0,
                             "format": "json",
                         },
+                        parse_tickets,
                     )
-                    if not isinstance(rows, list) or len(rows) > 2000:
-                        raise RailError("12306 MCP 余票结果格式不正确")
-                    try:
-                        items = []
-                        for row in rows:
-                            if not isinstance(row, dict) or any(
-                                not isinstance(row.get(key), str)
-                                or not row[key].strip()
-                                for key in (
-                                    "from_station",
-                                    "to_station",
-                                    "from_station_telecode",
-                                    "to_station_telecode",
-                                )
-                            ):
-                                raise ValueError
-                            for prefix, station in (
-                                ("from", departure),
-                                ("to", arrival),
-                            ):
-                                if (row[f"{prefix}_station"] == station["name"]) != (
-                                    row[f"{prefix}_station_telecode"] == station["code"]
-                                ):
-                                    raise ValueError
-                            # 12306 may include other stations in the same cities.
-                            if (
-                                row["from_station_telecode"] != departure["code"]
-                                or row["to_station_telecode"] != arrival["code"]
-                            ):
-                                continue
-                            items.append(_ticket(row, date, departure, arrival))
-                    except (KeyError, TypeError, ValueError, OverflowError):
-                        raise RailError(
-                            "12306 MCP 车次的站点、时间或票价信息不一致"
-                        ) from None
                     return {
                         "source": "12306_mcp",
                         "queried_at": datetime.now(CHINA).isoformat(),
                         "departure_station": departure,
                         "arrival_station": arrival,
-                        "matched_count": len(items),
-                        "excluded_other_station_count": len(rows) - len(items),
-                        "items": sorted(items, key=lambda item: item["departure_at"])[
-                            :20
-                        ],
+                        **tickets,
                     }
     except RailError:
         raise
@@ -254,6 +336,8 @@ async def search_rail(
         pending = [error]
         while pending:
             failure = pending.pop()
+            if failure is hook_error:
+                raise hook_error
             if isinstance(failure, RailError):
                 raise RailError(str(failure)) from None
             if isinstance(failure, BaseExceptionGroup):

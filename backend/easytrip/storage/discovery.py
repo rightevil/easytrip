@@ -429,6 +429,12 @@ class DiscoveryStore:
                     )
                     for item in items
                 ]
+            if result.get("candidates"):
+                timestamp = datetime.now(timezone.utc).isoformat()
+                connection.execute(
+                    "INSERT OR IGNORE INTO run_items(run_id,item_key,payload_json,updated_at) VALUES(?,?,?,?)",
+                    (run_id, "first_candidates_at", _encode(timestamp), timestamp),
+                )
             return result
 
     def get_source(self, trip_id, source_id, run_id=None, *, include_private=False):

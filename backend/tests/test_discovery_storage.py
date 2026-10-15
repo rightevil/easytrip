@@ -89,6 +89,22 @@ def save(db, trip, run, **kwargs):
     return db.save_discovery_batch(trip["id"], run["id"], run["generation"], **kwargs)
 
 
+def test_first_candidate_publication_is_atomic_and_never_rewritten(database):
+    trip = create(database)
+    run = running(database, trip)
+    source = note(database, trip, run)
+    mention, evidence, candidate = extraction(source)
+    assert database.get_run_item(run["id"], "first_candidates_at") is None
+    save(database, trip, run, mentions=[mention], evidence=[evidence])
+    assert database.get_run_item(run["id"], "first_candidates_at") is None
+    save(database, trip, run, candidates=[candidate])
+    first = database.get_run_item(run["id"], "first_candidates_at")
+    assert first
+    save(database, trip, run, candidates=[], replace_candidates=True)
+    save(database, trip, run, candidates=[candidate], replace_candidates=True)
+    assert Database(database.path).get_run_item(run["id"], "first_candidates_at") == first
+
+
 def test_direction_region_cost_retains_unlinked_evidence_and_original_source(database):
     trip = create(database)
     run = running(database, trip)
@@ -160,7 +176,7 @@ def test_p1_database_migrates_without_losing_data(tmp_path):
     assert db.get_trip(trip["id"])["messages"][0] == message
     assert db.get_run(run["id"])["generation"] == run["generation"]
     with db.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

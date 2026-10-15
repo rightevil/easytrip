@@ -84,8 +84,9 @@ class Amap:
             if self.after_request is not None:
                 try:
                     await self.after_request(path, None, error)
-                finally:
-                    raise error
+                except Exception:
+                    if isinstance(error, Exception):
+                        raise
             raise
         if self.after_request is not None:
             await self.after_request(path, payload, None)

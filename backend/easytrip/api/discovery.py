@@ -12,6 +12,10 @@ from .trips import _call
 def make_router():
     router = APIRouter(prefix="/api/trips", tags=["discovery"])
 
+    @router.get("/{trip_id}/usage")
+    def usage(trip_id: str, request: Request):
+        return request.app.state.settings.redact(_call(request, "usage_report", trip_id))
+
     @router.get("/{trip_id}/candidates")
     def candidates(
         trip_id: str,

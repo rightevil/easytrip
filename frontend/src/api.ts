@@ -105,6 +105,7 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
 }
 
 export const api = {
+  usage: (id: string) => call<UsageReport>(`/trips/${encodeURIComponent(id)}/usage`),
   searchRail: (id: string, query: RailSearchQuery) => call<RailSearchResult>(`/trips/${encodeURIComponent(id)}/rail/search`, 'POST', query),
   startPlanning: (id: string, operation_id: string, expected_version: number, budget: PlanningBudget, parent_plan_id?: string) => call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { kind: 'plan', operation_id, expected_version, budget, ...(parent_plan_id ? { parent_plan_id } : {}) }),
   planningInput: (id: string) => call<PlanningInput>(`/trips/${encodeURIComponent(id)}/planning-input`),
@@ -160,6 +161,6 @@ export const api = {
   confirmOrigin: (id: string, expected_version: number, expected_workspace_version: number, confirmation: OriginConfirmation) =>
     call<Trip>(`/trips/${encodeURIComponent(id)}/places/origin/confirm`, 'POST', { expected_version, expected_workspace_version, ...confirmation }),
 };
-import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding } from './discovery-types';
+import type { CandidateEvidence, CandidatePage, DiscoveryBudget, DiscoveryCoverage, DiscoveryResult, Gap, Source, TripUsage, Understanding, UsageReport } from './discovery-types';
 import type { ConfirmedOrigin, ManualPlaceConfirmation, ManualPlaceSearch, MapAction, OriginConfirmation, OriginSearch, PlacesSnapshot } from './places-types';
 import type { Plan, PlanningBudget, PlanningConstraints, PlanningInput, PlanningReplacement, PlanningReplacements, PlanningResult, RailSearchQuery, RailSearchResult } from './planning-types';

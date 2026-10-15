@@ -49,6 +49,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application):
         database.initialize()
+        database.recover_api_actions()
         async with direct_client() as client:
             application.state.http = client
 

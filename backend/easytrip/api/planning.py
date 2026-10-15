@@ -29,6 +29,27 @@ def make_router():
                     "message": "12306 MCP 未配置或暂不可用",
                 },
             )
+
+        async def before_call(name):
+            return _call(
+                request,
+                "begin_api_action",
+                trip_id,
+                snapshot["request_version"],
+                "rail",
+                name,
+            )
+
+        async def after_call(action_id, **usage):
+            if not _call(request, "finish_api_action", action_id, **usage):
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "usage_unavailable",
+                        "message": "用量记录未能保存，请稍后重试",
+                    },
+                )
+
         try:
             result = await search_rail(
                 settings.rail_mcp,
@@ -36,6 +57,8 @@ def make_router():
                 date=body.date,
                 departure_name=snapshot["departure_poi"]["name"],
                 arrival_name=snapshot["arrival_poi"]["name"],
+                before_call=before_call,
+                after_call=after_call,
             )
         except RailError as error:
             raise HTTPException(

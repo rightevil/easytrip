@@ -8,6 +8,7 @@ import { Runs } from './Runs';
 import { Discovery } from './Discovery';
 import { MapWorkspace } from './MapWorkspace';
 import { Planning } from './Planning';
+import { Usage } from './Usage';
 
 const labels = { saved: '已保存', dirty: '等待保存', saving: '保存中', error: '保存失败', conflict: '发生版本冲突' };
 const transports: [TripRequest['transport'], string][] = [['mixed', '灵活组合'], ['walking', '步行'], ['transit', '公共交通'], ['bicycling', '骑行'], ['electrobike', '电动车'], ['driving', '自驾']];
@@ -211,7 +212,7 @@ function TripView({ session, archived, onTrip, onArchive, onDelete, busy }: { se
       {workspace.active_tab === 'overview' && <><div className="summary-banner"><span className="eyebrow">下一段旅程</span><h2>{draft.request.destination || '目的地，还可以慢慢想'}</h2><p>{draft.request.origin ? `从${draft.request.origin}出发` : '出发地待补充'}<span> · </span>{draft.request.start_at ? new Date(draft.request.start_at).toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间待定'}</p></div><div className="section-subheading"><h3>候选地点</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><Discovery session={session} requestVersion={requestSave.version} category={workspace.category} archived={archived} /></>}
       {workspace.active_tab === 'map' && <><div className="section-subheading"><h3>地点与地图</h3><CategoryFilter value={workspace.category} onChange={category => session.workspace.update({ ...workspace, category })} /></div><MapWorkspace session={session} archived={archived} /><MapPreferences workspace={workspace} onChange={value => session.workspace.update(value)} /><Discovery session={session} requestVersion={requestSave.version} category={workspace.category} archived={archived} /></>}
       {workspace.active_tab === 'plan' && <Planning session={session} archived={archived} />}
-    </div></section><Chat session={session} archived={archived} /><Runs session={session} requestVersion={requestSave.version} archived={archived} /></div></div>
+    </div></section><Chat session={session} archived={archived} /><Runs session={session} requestVersion={requestSave.version} archived={archived} /><Usage tripId={session.trip.id} /></div></div>
   </>;
 }
 

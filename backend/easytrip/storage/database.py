@@ -144,6 +144,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
             connection.execute("SELECT id,input_hash,payload_json FROM plans LIMIT 0")
             connection.execute("SELECT id,trip_id,operation_json,poi_json FROM manual_candidates LIMIT 0")
             connection.execute("SELECT id,trip_id,request_version FROM manual_place_searches LIMIT 0")
+            connection.execute("SELECT id,trip_id,provider,status FROM api_actions LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):

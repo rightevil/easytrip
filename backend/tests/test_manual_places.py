@@ -412,8 +412,9 @@ def test_migration_007_to_008_preserves_existing_trip_workspace_and_adopted_plan
     )
     before_trip = database.get_trip(trip["id"])
     before_plans = database.list_plans(trip["id"])
-    # Migration 008 is additive; removing its empty tables recreates the 007 schema.
+    # Remove additive tables from later migrations to recreate the 007 schema.
     with database.connection(write=True) as connection:
+        connection.execute("DROP TABLE api_actions")
         connection.execute("DROP TABLE manual_candidates")
         connection.execute("DROP TABLE manual_place_searches")
         connection.execute("PRAGMA user_version=7")
@@ -426,7 +427,7 @@ def test_migration_007_to_008_preserves_existing_trip_workspace_and_adopted_plan
     assert migrated.list_places(trip["id"])["manual_candidates"][0]["id"] == identifier
     assert migrated.list_plans(trip["id"]) == before_plans
     with migrated.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 @pytest.mark.parametrize(

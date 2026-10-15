@@ -76,7 +76,7 @@ def test_backup_includes_committed_wal_without_changing_source(database, tmp_pat
         assert wal.read_bytes() == original_wal
         assert digest(destination) == before
         assert Database(destination).get_trip(trip["id"])["name"] == "尚在WAL中的更新"
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 9
     assert metadata["table_counts"]["trips"] == 2
     assert (
         metadata["table_counts"]["sources"]
@@ -109,7 +109,7 @@ def test_restored_copy_retains_all_rows_and_reopens_actual_application(
     assert digest(database.path) == digest(backup) == original
 
 
-@pytest.mark.parametrize("version", range(1, 9))
+@pytest.mark.parametrize("version", range(1, 10))
 def test_supported_older_versions_are_checked_and_copied_without_migration(
     tmp_path, version
 ):
@@ -300,7 +300,7 @@ def test_cli_backup_and_restore_require_new_explicit_restore_destination(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["schema_version"] == 8
+    assert json.loads(capsys.readouterr().out)["schema_version"] == 9
     assert digest(restored) == digest(backup)
 
 

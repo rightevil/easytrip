@@ -49,6 +49,7 @@ class DiscoveryRunner:
             if attempt >= 2:
                 return False
             attempt += 1
+            info = {**info, "model_id": info.get("model_id") or self.settings.model_id}
             action_id = await self.db("begin_action", run["id"], run["generation"], f"{logical_key}:model:{attempt}", "model", info)
             return action_id if action_id else False
 

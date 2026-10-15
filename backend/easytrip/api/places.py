@@ -2,6 +2,7 @@
 
 import asyncio
 import unicodedata
+from time import monotonic
 from typing import Annotated
 from uuid import UUID
 
@@ -33,7 +34,7 @@ async def _before_amap_request(application):
         application.state.amap_last_call_monotonic = loop.time()
 
 
-def _amap(request, *, max_calls):
+def _amap(request, *, max_calls, expected_version, operation="poi_search"):
     settings = getattr(request.app.state, "settings", None)
     http = getattr(request.app.state, "http", None)
     if settings is None or not settings.amap_web_key or http is None:
@@ -45,17 +46,93 @@ def _amap(request, *, max_calls):
             },
         )
 
+    action_id = None
+    started = None
+
     async def before_request():
+        nonlocal action_id, started
         await _before_amap_request(request.app)
+        action_id = _call(
+            request,
+            "begin_api_action",
+            request.path_params["trip_id"],
+            expected_version,
+            "amap",
+            operation,
+        )
+        started = monotonic()
+
+    async def after_request(path, payload, error):
+        nonlocal action_id
+        if action_id is not None:
+            status = (
+                "completed"
+                if error is None
+                else "failed"
+                if isinstance(error, AmapError) and error.infocode != "UNKNOWN"
+                else "unknown"
+            )
+            if error is None and (
+                not isinstance(payload.get("pois"), list)
+                or any(not isinstance(row, dict) for row in payload["pois"])
+                or (operation == "poi_detail" and len(payload["pois"]) != 1)
+            ):
+                status = "failed"
+            finished = _call(
+                request,
+                "finish_api_action",
+                action_id,
+                status=status,
+                elapsed_seconds=monotonic() - started,
+                metadata={"api_version": "v5"},
+            )
+            if not finished:
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "usage_unavailable",
+                        "message": "用量记录未能保存，请稍后重试",
+                    },
+                )
+            action_id = None
 
     return Amap(
-        http, settings.amap_web_key, max_calls=max_calls, before_request=before_request
+        http,
+        settings.amap_web_key,
+        max_calls=max_calls,
+        before_request=before_request,
+        after_request=after_request,
     )
 
 
-async def _search(request, amap, query, city):
+async def _search(request, amap, query, city, expected_version):
     cached = _call(request, "cached_poi_search", query, city)
     if cached is not None:
+        action_id = _call(
+            request,
+            "begin_api_action",
+            request.path_params["trip_id"],
+            expected_version,
+            "amap",
+            "poi_search",
+            cached=True,
+        )
+        finished = _call(
+            request,
+            "finish_api_action",
+            action_id,
+            status="completed",
+            elapsed_seconds=0,
+            metadata={"api_version": "v5"},
+        )
+        if not finished:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "usage_unavailable",
+                    "message": "用量记录未能保存，请稍后重试",
+                },
+            )
         return cached
     raw = await amap.search_candidates(query, city)
     read_at = now()
@@ -72,8 +149,10 @@ async def _search(request, amap, query, city):
     return _call(request, "save_poi_search", query, city, response, read_at)
 
 
-async def _verify_detail(request, poi_id, context):
-    amap = _amap(request, max_calls=1)
+async def _verify_detail(request, poi_id, context, expected_version):
+    amap = _amap(
+        request, max_calls=1, expected_version=expected_version, operation="poi_detail"
+    )
     try:
         async with asyncio.timeout(30):
             response = await amap.detail(poi_id)
@@ -140,7 +219,11 @@ def make_router():
     @router.post("/{trip_id}/places/match")
     async def match(trip_id: str, body: MatchPlaces, request: Request):
         session = _call(request, "begin_place_match", trip_id, body)
-        amap = _amap(request, max_calls=40) if session["items"] else None
+        amap = (
+            _amap(request, max_calls=40, expected_version=body.expected_version)
+            if session["items"]
+            else None
+        )
         matches = {}
         try:
             async with asyncio.timeout(60):
@@ -167,7 +250,13 @@ def make_router():
                         }
                         continue
                     try:
-                        response = await _search(request, amap, candidate["name"], city)
+                        response = await _search(
+                            request,
+                            amap,
+                            candidate["name"],
+                            city,
+                            body.expected_version,
+                        )
                         matches[candidate["id"]] = match_pois(
                             candidate, mentions, response, now()
                         )
@@ -223,10 +312,12 @@ def make_router():
                     "current_version": trip["request_version"],
                 },
             )
-        amap = _amap(request, max_calls=2)
+        amap = _amap(request, max_calls=2, expected_version=expected_version)
         try:
             async with asyncio.timeout(30):
-                response = await _search(request, amap, query.strip(), city.strip())
+                response = await _search(
+                    request, amap, query.strip(), city.strip(), expected_version
+                )
         except (AmapError, ValueError, TimeoutError):
             raise HTTPException(
                 502,
@@ -254,7 +345,9 @@ def make_router():
             context = _call(request, "manual_confirmation_context", trip_id, body)
             verified = None
             if "candidate_id" not in context:
-                verified = await _verify_detail(request, body.poi_id, context)
+                verified = await _verify_detail(
+                    request, body.poi_id, context, body.expected_version
+                )
             return _call(request, "confirm_manual_poi", trip_id, body, verified)
 
     @router.post("/{trip_id}/places/candidates/{candidate_id}/confirm")
@@ -264,7 +357,9 @@ def make_router():
         context = _call(
             request, "candidate_confirmation_context", trip_id, candidate_id, body
         )
-        verified = await _verify_detail(request, body.poi_id, context)
+        verified = await _verify_detail(
+            request, body.poi_id, context, body.expected_version
+        )
         return _call(
             request, "confirm_candidate_poi", trip_id, candidate_id, body, verified
         )
@@ -295,10 +390,10 @@ def make_router():
                     "current_version": trip["request_version"],
                 },
             )
-        amap = _amap(request, max_calls=2)
+        amap = _amap(request, max_calls=2, expected_version=expected_version)
         try:
             async with asyncio.timeout(30):
-                response = await _search(request, amap, query, city)
+                response = await _search(request, amap, query, city, expected_version)
         except (AmapError, ValueError, TimeoutError):
             raise HTTPException(
                 502,
@@ -316,7 +411,9 @@ def make_router():
         verified = None
         if body.source == "amap":
             context = _call(request, "origin_confirmation_context", trip_id, body)
-            verified = await _verify_detail(request, body.poi_id, context)
+            verified = await _verify_detail(
+                request, body.poi_id, context, body.expected_version
+            )
         return _call(request, "confirm_origin", trip_id, body, verified)
 
     return router

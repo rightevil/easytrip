@@ -134,7 +134,16 @@ export interface Understanding {
   query_plan: { query: string; purpose: 'main' | 'discovery'; direction_hint: string | null }[];
   reserved_gap_searches: number;
 }
-export interface TripUsage { external_calls: number; model_tokens: number; images: number; unknown_cost_calls: number; cost_cny: number | null }
+export interface TripUsage {
+  external_calls: number; model_tokens: number; images: number; unknown_cost_calls: number; cost_cny: number | null;
+  prompt_tokens?: number; completion_tokens?: number; cache_hits?: number; failed_calls?: number; unknown_result_calls?: number; elapsed_seconds?: number | null;
+}
+export interface UsageReport extends TripUsage {
+  scope: string; account_total_known: boolean; pricing_status: string;
+  providers: Record<string, TripUsage>;
+  runs: { id: string; first_candidates_at: string | null; interrupted_stage_time_unknown: boolean }[];
+  actions: { id: string; status: string }[];
+}
 export interface DiscoveryResult {
   summary?: string;
   partial_reasons?: string[];

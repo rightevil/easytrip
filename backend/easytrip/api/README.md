@@ -2,13 +2,14 @@
 
 数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
-当前连续数据库迁移为 8（`008_manual_places.sql`），保留既有候选、地图、采用指针与方案快照。P3 使用独立 POI 覆盖和缓存；P4 已接通真实路线、单日排程、有限餐饮补查与后缀排程，并支持不经过攻略发现的用户指定候选。
+当前连续数据库迁移为 9（`009_api_actions.sql`），新增同步地点/铁路查询用量账本，保留既有候选、地图、采用指针与方案快照；迁移前自动一致性备份。P3 使用独立 POI 覆盖和缓存；P4 已接通真实路线、单日排程、有限餐饮补查与后缀排程，并支持不经过攻略发现的用户指定候选。
 
 | 方法与路径 | 请求 / 返回 |
 |---|---|
 | `POST /api/trips` | `operation_id`（UUID）、可选 `name` / `request`；返回已持久化行程 |
 | `GET /api/trips` | `include_archived`、`limit`（1–100）、`offset`；返回 `items/total/limit/offset` |
 | `GET /api/trips/{id}` | 条件、工作区、消息和最近任务 |
+| `GET /api/trips/{id}/usage` | 当前行程已记录的任务/API/provider 用量及脱敏动作明细；不含参数、原文、密钥或服务结果；金额未核定保持 `null` |
 | `PATCH /api/trips/{id}` | `expected_version`、`name` 和/或完整 `request` |
 | `PATCH /api/trips/{id}/workspace` | `expected_version`（工作区版本）、完整 `workspace` |
 | `POST /api/trips/{id}/messages` | `operation_id`（UUID）、`content` |

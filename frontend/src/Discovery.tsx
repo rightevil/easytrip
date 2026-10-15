@@ -202,7 +202,7 @@ function Coverage({ run }: { run: Run }) {
     <p>本轮外部调用 {count(run.usage.external_calls)} · 搜索 {count(run.usage.searches)} · 模型调用 {count(run.usage.model_calls)} · 已知模型 token {count(run.usage.model_tokens)} · 未结清预留 token {count(run.usage.reserved_tokens)} · 费用未核定{run.usage.unknown_cost_calls ? ` · ${run.usage.unknown_cost_calls} 次调用用量未知` : ''}。token 是用量，不是金额。</p>
     <p>评论取得、送交分析与判断分别计数；本轮新增来源选取评论 {count(coverage.comments_selected)}。图片提交次数含重试和旧来源的新提交；去重覆盖按来源与原图序号计数，视频未分析。</p>
     {run.usage.unknown_result_calls ? <p>有 {run.usage.unknown_result_calls} 次外部调用结果未知，可能已经执行。</p> : null}
-    {cumulative && <p>本行程累计：外部调用 {count(cumulative.external_calls)} · token {count(cumulative.model_tokens)} · 图片提交 {count(cumulative.images)} 次 · {cumulative.unknown_cost_calls} 次用量不完整 · 费用{cumulative.cost_cny === null ? '未知' : `${cumulative.cost_cny} 元`}。</p>}
+    {cumulative && <p>本行程已记录用量：外部调用 {count(cumulative.external_calls)} · token {count(cumulative.model_tokens)} · 图片提交 {count(cumulative.images)} 次 · {cumulative.unknown_cost_calls} 次模型用量不完整 · 费用{cumulative.cost_cny === null ? '未知' : `${cumulative.cost_cny} 元`}。最新统计见“调用用量”，历史未计量操作不补算。</p>}
     {run.usage.interrupted_stage_time_unknown && <p>服务中断阶段耗时未知；已确认用量仍保留。</p>}
     {partialReasons.length > 0 && <p>未完成项：{partialReasons.map(reason => pauseReasons[reason] ?? reason).join('；')}</p>}
     {result?.model?.semantic_quality === 'not_validated' && <p>模型语义质量未验证，候选与评价请结合原文核对。</p>}
