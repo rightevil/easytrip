@@ -85,6 +85,15 @@ class ConfirmPoi(Model):
     poi_id: Identifier
 
 
+class ConfirmManualPoi(Model):
+    operation_id: UUID
+    expected_version: Version
+    expected_workspace_version: Version
+    search_id: UUID
+    poi_id: Identifier
+    category: Literal["eat", "play", "stay"]
+
+
 class MapAction(Model):
     expected_version: Version
     expected_workspace_version: Version

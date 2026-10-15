@@ -38,7 +38,13 @@ class PlaceStore:
             "SELECT * FROM candidates WHERE id=? AND trip_id=?", (candidate_id, trip_id)
         ).fetchone()
         if row is None:
-            raise NotFound()
+            row = connection.execute(
+                "SELECT * FROM manual_candidates WHERE id=? AND trip_id=?",
+                (candidate_id, trip_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound()
+            return self._manual_candidate(row), []
         candidate = self._entity(row, CandidateDraft)
         mentions = []
         for identifier in candidate["mention_ids"]:
@@ -52,6 +58,191 @@ class PlaceStore:
                 raise DatabaseError("候选提及引用缺失")
             mentions.append(self._entity(mention, PlaceMention))
         return candidate, mentions
+
+    @staticmethod
+    def _manual_candidate(row):
+        poi = Poi.model_validate_json(row["poi_json"]).model_dump(mode="json")
+        return {
+            "id": row["id"],
+            "trip_id": row["trip_id"],
+            "request_version": row["request_version"],
+            "run_id": None,
+            "source": "user",
+            "name": poi["name"],
+            "city": poi["city"],
+            "kind": "place",
+            "category": row["category"],
+            "mention_ids": [],
+            "evidence_ids": [],
+            "source_ids": [],
+            "match_status": "unique",
+            "ranking_reasons": ["用户指定地点；尚无攻略或评价依据"],
+            "poi": poi,
+            "created_at": row["created_at"],
+        }
+
+    def _place_match_rows(self, connection, trip_id):
+        from .database import encode
+
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM candidate_matches WHERE trip_id=? ORDER BY rowid",
+                (trip_id,),
+            )
+        ]
+        for row in connection.execute(
+            "SELECT * FROM manual_candidates WHERE trip_id=? ORDER BY rowid", (trip_id,)
+        ):
+            rows.append(
+                {
+                    "candidate_id": row["id"],
+                    "run_id": None,
+                    "request_version": row["request_version"],
+                    "confirmed": 1,
+                    "updated_at": row["created_at"],
+                    "payload_json": encode(
+                        {
+                            "status": "unique",
+                            "poi": json.loads(row["poi_json"]),
+                            "options": [],
+                            "reason": "用户指定并确认高德地点",
+                        }
+                    ),
+                }
+            )
+        return rows
+
+    def _place_match(self, connection, trip_id, candidate_id):
+        row = connection.execute(
+            "SELECT payload_json FROM candidate_matches WHERE trip_id=? AND candidate_id=?",
+            (trip_id, candidate_id),
+        ).fetchone()
+        if row:
+            return PoiMatch.model_validate_json(row["payload_json"])
+        row = connection.execute(
+            "SELECT poi_json FROM manual_candidates WHERE trip_id=? AND id=?",
+            (trip_id, candidate_id),
+        ).fetchone()
+        if row:
+            return PoiMatch(
+                status="unique", poi=Poi.model_validate_json(row["poi_json"])
+            )
+        return None
+
+    def save_manual_search(self, trip_id, expected_version, query, city, options):
+        from .database import encode, now
+
+        items = [Poi.model_validate(option) for option in options]
+        items = [
+            poi.model_dump(mode="json")
+            for poi in items
+            if poi.id
+            and poi.name
+            and poi.location is not None
+            and _normalized(poi.city or "").removesuffix("市")
+            == _normalized(city).removesuffix("市")
+        ]
+        with self.connection(write=True) as connection:
+            trip = self._row(connection, trip_id)
+            self._editable(trip)
+            self._version(trip, expected_version)
+            search_id = str(uuid4())
+            connection.execute(
+                "INSERT INTO manual_place_searches VALUES(?,?,?,?,?,?,?)",
+                (
+                    search_id,
+                    trip_id,
+                    expected_version,
+                    query,
+                    city,
+                    encode(items),
+                    now(),
+                ),
+            )
+            return {
+                "search_id": search_id,
+                "request_version": expected_version,
+                "query": query,
+                "city": city,
+                "items": items,
+            }
+
+    def _manual_confirmation(self, connection, trip_id, body):
+        from .database import OperationConflict, encode
+
+        trip = self._row(connection, trip_id)
+        self._editable(trip)
+        receipt = connection.execute(
+            "SELECT * FROM manual_candidates WHERE trip_id=? AND operation_id=?",
+            (trip_id, str(body.operation_id)),
+        ).fetchone()
+        operation = encode(body.model_dump(mode="json", exclude={"operation_id"}))
+        if receipt is not None:
+            if receipt["operation_json"] != operation:
+                raise OperationConflict("添加地点操作ID已用于不同内容")
+            return {"candidate_id": receipt["id"]}
+        self._version(trip, body.expected_version)
+        self._version(trip, body.expected_workspace_version, "workspace_version")
+        search = connection.execute(
+            "SELECT * FROM manual_place_searches WHERE id=? AND trip_id=? AND request_version=?",
+            (str(body.search_id), trip_id, body.expected_version),
+        ).fetchone()
+        if search is None:
+            raise OperationConflict("地点搜索不属于当前行程条件，请重新搜索")
+        chosen = next(
+            (
+                poi
+                for poi in json.loads(search["payload_json"])
+                if poi["id"] == body.poi_id
+            ),
+            None,
+        )
+        if chosen is None:
+            raise OperationConflict("只能确认本次已保存搜索中的有效POI")
+        return {"poi": chosen, "city": search["city"], "operation_json": operation}
+
+    def manual_confirmation_context(self, trip_id, body):
+        with self.connection() as connection:
+            return self._manual_confirmation(connection, trip_id, body)
+
+    def confirm_manual_poi(self, trip_id, body, verified_poi=None):
+        from .database import OperationConflict, encode, now
+
+        with self.connection(write=True) as connection:
+            context = self._manual_confirmation(connection, trip_id, body)
+            candidate_id = context.get("candidate_id")
+            if candidate_id is None:
+                poi = Poi.model_validate(verified_poi)
+                if (
+                    poi.id != body.poi_id
+                    or not poi.name
+                    or poi.location is None
+                    or _normalized(poi.city or "").removesuffix("市")
+                    != _normalized(context["city"]).removesuffix("市")
+                ):
+                    raise OperationConflict("POI详情的标识、坐标或城市未通过核验")
+                candidate_id = str(uuid4())
+                connection.execute(
+                    "INSERT INTO manual_candidates VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        candidate_id,
+                        trip_id,
+                        body.expected_version,
+                        str(body.operation_id),
+                        context["operation_json"],
+                        body.category,
+                        encode(poi.model_dump(mode="json")),
+                        now(),
+                    ),
+                )
+            result = self._places_result(
+                connection,
+                trip_id,
+                self._selected_discovery_run(connection, trip_id, None),
+            )
+            result["candidate_id"] = candidate_id
+            return result
 
     def begin_place_match(self, trip_id, body):
         from .database import OperationConflict
@@ -156,12 +347,17 @@ class PlaceStore:
                 (trip_id, run_id),
             )
         ]
-        current_ids = {candidate["id"] for candidate in candidates}
+        manual_candidates = [
+            self._manual_candidate(row)
+            for row in connection.execute(
+                "SELECT * FROM manual_candidates WHERE trip_id=? ORDER BY rowid",
+                (trip_id,),
+            )
+        ]
+        current_ids = {candidate["id"] for candidate in candidates + manual_candidates}
         visible = set(workspace.map_visible_ids)
         matches, points, by_candidate = [], {}, {}
-        for row in connection.execute(
-            "SELECT * FROM candidate_matches WHERE trip_id=? ORDER BY rowid", (trip_id,)
-        ):
+        for row in self._place_match_rows(connection, trip_id):
             if row["candidate_id"] not in current_ids | visible:
                 continue
             match = PoiMatch.model_validate_json(row["payload_json"]).model_dump(
@@ -177,7 +373,8 @@ class PlaceStore:
                 confirmed=bool(row["confirmed"]),
                 updated_at=row["updated_at"],
             )
-            matches.append(match)
+            if candidate.get("source") != "user":
+                matches.append(match)
             by_candidate[row["candidate_id"]] = match
             if match["status"] != "unique":
                 continue
@@ -194,9 +391,12 @@ class PlaceStore:
                     "evidence_refs": [],
                     "mention_ids": [],
                     "categories": [],
+                    "user_candidate_ids": [],
                 },
             )
             point["candidate_ids"].append(candidate["id"])
+            if candidate.get("source") == "user":
+                point["user_candidate_ids"].append(candidate["id"])
             for field in ("evidence_ids", "mention_ids"):
                 point[field] = list(dict.fromkeys([*point[field], *candidate[field]]))
             for identifier in candidate["evidence_ids"]:
@@ -275,6 +475,7 @@ class PlaceStore:
             "run_id": run_id,
             "request_version": trip["request_version"],
             "candidates": candidates,
+            "manual_candidates": manual_candidates,
             "matches": matches,
             "points": list(points.values()),
             "trip": self._detail(connection, trip),
@@ -331,7 +532,10 @@ class PlaceStore:
                 and trip["workspace_version"] != body.expected_workspace_version
             )
             if update_map and not skipped:
-                matched = self._places_result(connection, trip_id, run_id)["candidates"]
+                places = self._places_result(connection, trip_id, run_id)
+                matched = places["candidates"]
+                if body.refresh_map:
+                    matched += places["manual_candidates"]
                 workspace.map_visible_ids = self._top_map_ids(
                     matched, city=workspace.map_city
                 )
@@ -370,15 +574,26 @@ class PlaceStore:
         from .database import OperationConflict
 
         with self.connection(write=True) as connection:
-            trip, run_id = self._place_scope(connection, trip_id, body.expected_version)
+            manual = connection.execute(
+                "SELECT 1 FROM manual_candidates WHERE trip_id=? AND id=?",
+                (trip_id, body.candidate_id),
+            ).fetchone()
+            if manual:
+                trip = self._row(connection, trip_id)
+                self._editable(trip)
+                self._version(trip, body.expected_version)
+                run_id = self._selected_discovery_run(connection, trip_id, None)
+            else:
+                trip, run_id = self._place_scope(
+                    connection, trip_id, body.expected_version
+                )
             self._version(trip, body.expected_workspace_version, "workspace_version")
             workspace = Workspace.model_validate_json(trip["workspace_json"])
             before = workspace.model_dump(mode="json")
             if body.action in {"initialize", "refresh"}:
                 if body.action == "refresh" or not workspace.map_initialized:
-                    candidates = self._places_result(connection, trip_id, run_id)[
-                        "candidates"
-                    ]
+                    places = self._places_result(connection, trip_id, run_id)
+                    candidates = places["candidates"] + places["manual_candidates"]
                     workspace.map_visible_ids = self._top_map_ids(
                         candidates,
                         category=body.category,
@@ -389,13 +604,7 @@ class PlaceStore:
                 candidate, _ = self._candidate_for_places(
                     connection, trip_id, body.candidate_id
                 )
-                row = connection.execute(
-                    "SELECT payload_json FROM candidate_matches WHERE candidate_id=? AND trip_id=?",
-                    (body.candidate_id, trip_id),
-                ).fetchone()
-                match = (
-                    PoiMatch.model_validate_json(row["payload_json"]) if row else None
-                )
+                match = self._place_match(connection, trip_id, body.candidate_id)
                 if (
                     match is None
                     or match.status != "unique"
@@ -404,6 +613,7 @@ class PlaceStore:
                     raise OperationConflict("地图操作必须对应唯一匹配的有效POI")
                 if (
                     body.action in {"add", "select"}
+                    and candidate.get("source") != "user"
                     and candidate["request_version"] != body.expected_version
                 ):
                     raise OperationConflict("历史条件候选不能加入当前选择")
@@ -423,10 +633,7 @@ class PlaceStore:
                 elif body.action in {"remove", "unselect"}:
                     remove_ids = {body.candidate_id}
                     if field == "map_visible_ids":
-                        for linked in connection.execute(
-                            "SELECT candidate_id,payload_json FROM candidate_matches WHERE trip_id=?",
-                            (trip_id,),
-                        ):
+                        for linked in self._place_match_rows(connection, trip_id):
                             linked_match = PoiMatch.model_validate_json(
                                 linked["payload_json"]
                             )

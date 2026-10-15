@@ -2,7 +2,7 @@
 
 数据库随 FastAPI 生命周期初始化，默认 `data/easytrip.sqlite3`。行程保存和本地准备任务不依赖外部服务；P2 `discover` 请求由单执行器调用小红书与模型。普通消息保存不自动调用模型；消息保存只替换已配置的凭证，普通用户输入与链接原样保留。
 
-当前连续数据库迁移为 7（`007_planning_replacements.sql`），P3 使用独立 POI 覆盖和缓存，保留 P2 文字候选与原证据。P3 请求高德 Web API，不启动模型或 MCP；P4 已接通真实路线与单日排程，餐饮有限补查与后缀排程已接通。
+当前连续数据库迁移为 8（`008_manual_places.sql`），保留既有候选、地图、采用指针与方案快照。P3 使用独立 POI 覆盖和缓存；P4 已接通真实路线、单日排程、有限餐饮补查与后缀排程，并支持不经过攻略发现的用户指定候选。
 
 | 方法与路径 | 请求 / 返回 |
 |---|---|
@@ -83,6 +83,17 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 `candidates` 保留原 `evidence_ids` 并增加 POI 状态、来源 ID 与 `ranking_reasons`。排序仅对已核城市/类别冲突作资格过滤，再用明示偏好短语的关联原文字面命中、不同作者、亲历正负评论、原发布时间解释次序；负面或混合命中显示冲突。无法确认当前价格时不以预算硬排除，不将点赞、样本数量或采样比例称为全平台好评率。地点确认不表示 P2 语义质量通过，也不代表路线与时间表已可执行。
 
 ## P4 规划输入、单日排程与方案调整
+
+手动候选使用以下接口，不需要发现 Run、MCP 或模型配置：
+
+| 方法与路径 | 契约 |
+|---|---|
+| `GET /api/trips/{id}/places/manual/search` | `query`（1–80 字）、`city`、`expected_version`；查询真实高德并保存本行程搜索快照，返回 `search_id/request_version/query/city/items` |
+| `POST /api/trips/{id}/places/manual/confirm` | `operation_id` UUID、`expected_version/expected_workspace_version`、`search_id/poi_id/category`（`eat/play/stay`）；只能确认已保存搜索选项，重新核对详情标识、城市与坐标，返回地点快照及 `candidate_id` |
+
+`GET /places` 的独立 `manual_candidates` 数组始终包含本行程用户指定候选，字段包括 `source="user"`、`run_id=null`、分类及已核对 POI。P2 的 `candidates`、来源与评价契约不变。确认只保存候选；复用 `/places/map` 的 `add/remove/select/unselect` 分别控制地图与行程。无发现轮次、修改时间或查看历史发现结果时，用户候选仍可读取。地图按 POI 合并落点，手动候选与攻略别名不重复创建 Marker。
+
+确认校验行程归属、两个版本及归档状态，详情晚到后再次检查；同 UUID 重试返回当前保存状态并跳过重复详情请求，同 UUID 不同内容拒绝。沿用单后端进程的串行确认机制。用户候选独立存储，不伪造攻略、评论或推荐依据；进入规划时冻结 `source="user"` 及真实 POI，停留时间和费用保持未知，需由用户填写。改变选择会改变规划签名，旧方案采用必须重新校验。
 
 | 方法与路径 | 契约 |
 |---|---|

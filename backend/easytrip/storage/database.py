@@ -134,6 +134,8 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
             connection.execute("SELECT stage_started_at FROM runs LIMIT 0")
             connection.execute("SELECT candidate_id,run_id,payload_json FROM candidate_matches LIMIT 0")
             connection.execute("SELECT id,input_hash,payload_json FROM plans LIMIT 0")
+            connection.execute("SELECT id,trip_id,operation_json,poi_json FROM manual_candidates LIMIT 0")
+            connection.execute("SELECT id,trip_id,request_version FROM manual_place_searches LIMIT 0")
 
     @staticmethod
     def _row(connection, trip_id):
@@ -283,7 +285,7 @@ class Database(DiscoveryStore, ActionStore, DiscoveryRunStore, PlaceStore, Plann
             self._version(row, body.expected_version, "workspace_version")
             previous = Workspace.model_validate_json(row["workspace_json"])
             workspace = body.workspace.model_copy()
-            if previous.map_initialized or connection.execute("SELECT 1 FROM candidate_matches WHERE trip_id=? LIMIT 1", (trip_id,)).fetchone() is not None:
+            if previous.map_initialized or connection.execute("SELECT 1 FROM candidate_matches WHERE trip_id=? UNION ALL SELECT 1 FROM manual_candidates WHERE trip_id=? LIMIT 1", (trip_id, trip_id)).fetchone() is not None:
                 # Viewport autosave can resend old IDs; P3 membership changes only through places/map.
                 for field in ("selected_ids", "map_visible_ids"):
                     setattr(workspace, field, getattr(previous, field))

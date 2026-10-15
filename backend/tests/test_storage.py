@@ -42,7 +42,7 @@ def test_migration_and_defaults_survive_reopen(database):
     assert second.get_trip(trip["id"]) == trip
     with second.connection() as connection:
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
 
 
 def test_creation_and_messages_are_idempotent_without_conflating_payloads(database):

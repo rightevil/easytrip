@@ -7,7 +7,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ..domain.places import ConfirmOrigin, ConfirmPoi, MapAction, MatchPlaces, Poi
+from ..domain.places import (
+    ConfirmManualPoi,
+    ConfirmOrigin,
+    ConfirmPoi,
+    MapAction,
+    MatchPlaces,
+    Poi,
+)
 from ..integrations.amap import Amap, AmapBudgetExceeded, AmapError
 from ..services.places import match_pois, normalize_poi
 from ..storage.database import now
@@ -189,6 +196,66 @@ def make_router():
     @router.post("/{trip_id}/places/map")
     def map_action(trip_id: str, body: MapAction, request: Request):
         return _call(request, "apply_map_action", trip_id, body)
+
+    @router.get("/{trip_id}/places/manual/search")
+    async def search_manual(
+        trip_id: str,
+        request: Request,
+        query: Annotated[str, Query(min_length=1, max_length=80)],
+        city: Annotated[str, Query(min_length=1, max_length=200)],
+        expected_version: Annotated[int, Query(ge=1)],
+    ):
+        if not query.strip() or not city.strip():
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "invalid_manual_search",
+                    "message": "地点名称和城市不能为空白",
+                },
+            )
+        trip = _call(request, "get_trip", trip_id)
+        if trip["request_version"] != expected_version or trip["status"] == "archived":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "version_conflict",
+                    "message": "行程条件已变更，请重新搜索地点",
+                    "current_version": trip["request_version"],
+                },
+            )
+        amap = _amap(request, max_calls=2)
+        try:
+            async with asyncio.timeout(30):
+                response = await _search(request, amap, query.strip(), city.strip())
+        except (AmapError, ValueError, TimeoutError):
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "manual_search_failed",
+                    "message": "地点搜索失败，请稍后重试",
+                },
+            ) from None
+        return _call(
+            request,
+            "save_manual_search",
+            trip_id,
+            expected_version,
+            query.strip(),
+            city.strip(),
+            response["pois"],
+        )
+
+    @router.post("/{trip_id}/places/manual/confirm")
+    async def confirm_manual(trip_id: str, body: ConfirmManualPoi, request: Request):
+        if not hasattr(request.app.state, "manual_confirmation_lock"):
+            request.app.state.manual_confirmation_lock = asyncio.Lock()
+        # shortcut: in-flight retries share this process lock; use shared claims before enabling multiple workers.
+        async with request.app.state.manual_confirmation_lock:
+            context = _call(request, "manual_confirmation_context", trip_id, body)
+            verified = None
+            if "candidate_id" not in context:
+                verified = await _verify_detail(request, body.poi_id, context)
+            return _call(request, "confirm_manual_poi", trip_id, body, verified)
 
     @router.post("/{trip_id}/places/candidates/{candidate_id}/confirm")
     async def confirm(

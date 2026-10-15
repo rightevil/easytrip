@@ -32,10 +32,7 @@ class PlanningStore:
                 item["poi"]["city"].removesuffix("市") for item in current["selected"]
             }
             result = []
-            for row in connection.execute(
-                "SELECT candidate_id,payload_json FROM candidate_matches WHERE trip_id=? ORDER BY rowid DESC LIMIT 100",
-                (trip_id,),
-            ):
+            for row in self._place_match_rows(connection, trip_id)[::-1][:100]:
                 match = PoiMatch.model_validate_json(row["payload_json"])
                 if (
                     row["candidate_id"] in current["selected_ids"]
@@ -59,6 +56,11 @@ class PlanningStore:
                             "candidate_id": candidate["id"],
                             "name": candidate["name"],
                             "category": candidate["category"],
+                            **(
+                                {"source": "user"}
+                                if candidate.get("source") == "user"
+                                else {}
+                            ),
                             "poi": match.poi.model_dump(mode="json"),
                         }
                     )
@@ -122,11 +124,7 @@ class PlanningStore:
             candidate, _ = self._candidate_for_places(
                 connection, trip_id, body.replacement_id
             )
-            row = connection.execute(
-                "SELECT payload_json FROM candidate_matches WHERE trip_id=? AND candidate_id=?",
-                (trip_id, body.replacement_id),
-            ).fetchone()
-            match = PoiMatch.model_validate_json(row[0]) if row else None
+            match = self._place_match(connection, trip_id, body.replacement_id)
             if (
                 not previous
                 or candidate["kind"] != "place"
@@ -288,11 +286,7 @@ class PlanningStore:
                     identifier,
                 )
                 continue
-            row = connection.execute(
-                "SELECT payload_json FROM candidate_matches WHERE trip_id=? AND candidate_id=?",
-                (trip_id, identifier),
-            ).fetchone()
-            match = PoiMatch.model_validate_json(row[0]) if row else None
+            match = self._place_match(connection, trip_id, identifier)
             if (
                 candidate["kind"] != "place"
                 or match is None
@@ -336,6 +330,7 @@ class PlanningStore:
                     "name": candidate["name"],
                     "category": candidate["category"],
                     "kind": candidate["kind"],
+                    **({"source": "user"} if candidate.get("source") == "user" else {}),
                     "city": poi["city"],
                     "run_id": candidate["run_id"],
                     "poi": poi,

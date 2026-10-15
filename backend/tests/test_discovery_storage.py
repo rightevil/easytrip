@@ -160,7 +160,7 @@ def test_p1_database_migrates_without_losing_data(tmp_path):
     assert db.get_trip(trip["id"])["messages"][0] == message
     assert db.get_run(run["id"])["generation"] == run["generation"]
     with db.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
