@@ -1,8 +1,16 @@
-from datetime import datetime
+from datetime import date as LocalDate
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 Version = Annotated[int, Field(strict=True, ge=1)]
 Name = Annotated[str, Field(min_length=1, max_length=120)]
@@ -39,6 +47,7 @@ class ConfirmedOrigin(Model):
 
 class ActivityConstraint(Model):
     candidate_id: Identifier
+    date: LocalDate | None = None
     duration_minutes: Annotated[int, Field(strict=True, ge=1, le=1440)] | None = None
     duration_source: Literal["user", "source", "estimated", "unknown"] = "unknown"
     cost_cny: (
@@ -53,6 +62,13 @@ class ActivityConstraint(Model):
     fixed_start_at: datetime | None = None
     not_before: datetime | None = None
     not_after: datetime | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_unassigned_date(self, handler):
+        result = handler(self)
+        if self.date is None:
+            result.pop("date", None)
+        return result
 
     @field_validator("fixed_start_at", "not_before", "not_after")
     @classmethod
@@ -80,7 +96,33 @@ class ActivityConstraint(Model):
         return self
 
 
+class DayWindow(Model):
+    date: LocalDate
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def aware_time(cls, value):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("每日时间窗口必须带时区")
+        return value
+
+    @model_validator(mode="after")
+    def positive_window(self):
+        if self.start_at and self.end_at and self.end_at <= self.start_at:
+            raise ValueError("每日结束时间必须晚于开始时间")
+        return self
+
+
+class OvernightStay(Model):
+    date: LocalDate
+    candidate_id: Identifier
+
+
 class PlanningConstraints(Model):
+    day_windows: list[DayWindow] = Field(default_factory=list, max_length=14)
+    overnight_stays: list[OvernightStay] = Field(default_factory=list, max_length=13)
     progress_at: datetime | None = None
     progress_origin: ConfirmedOrigin | None = None
     dietary_restrictions: list[Annotated[str, Field(min_length=1, max_length=200)]] = (
@@ -99,6 +141,14 @@ class PlanningConstraints(Model):
     activity_constraints: list[ActivityConstraint] = Field(
         default_factory=list, max_length=100
     )
+
+    @model_serializer(mode="wrap")
+    def omit_single_day_defaults(self, handler):
+        result = handler(self)
+        for field in ("day_windows", "overnight_stays"):
+            if not getattr(self, field):
+                result.pop(field, None)
+        return result
 
     @field_validator("timezone")
     @classmethod
@@ -120,6 +170,31 @@ class PlanningConstraints(Model):
 
     @model_validator(mode="after")
     def distinct_constraints(self):
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo(self.timezone)
+        dates = [window.date for window in self.day_windows]
+        if any(
+            right != left + timedelta(days=1) for left, right in zip(dates, dates[1:])
+        ):
+            raise ValueError("每日窗口必须按连续且唯一的本地日期排列")
+        for window in self.day_windows:
+            if any(
+                value and value.astimezone(zone).date() != window.date
+                for value in (window.start_at, window.end_at)
+            ):
+                raise ValueError("每日时间必须属于所填本地日期")
+        nights = [stay.date for stay in self.overnight_stays]
+        if len(nights) != len(set(nights)) or not set(nights).issubset(dates[:-1]):
+            raise ValueError("每晚酒店只能绑定一次，且必须属于非末日窗口")
+        for item in self.activity_constraints:
+            if item.date and item.date not in dates:
+                raise ValueError("活动日期必须对应明确的每日窗口")
+            if item.date and any(
+                value and value.astimezone(zone).date() != item.date
+                for value in (item.fixed_start_at, item.not_before, item.not_after)
+            ):
+                raise ValueError("活动预约和时间窗必须属于分配日期")
         if (self.progress_at is None) != (self.progress_origin is None):
             raise ValueError("当前位置与当前时间必须成对明确提供")
         if self.progress_origin and self.progress_origin.source != "map":
@@ -164,6 +239,15 @@ class TripRequest(Model):
             and self.planning.end_at <= self.start_at
         ):
             raise ValueError("结束期限必须晚于出发时间")
+        deadline = self.planning.end_at
+        if self.start_at and self.duration_minutes is not None:
+            duration_end = self.start_at + timedelta(minutes=self.duration_minutes)
+            deadline = min(deadline, duration_end) if deadline else duration_end
+        for window in self.planning.day_windows:
+            if self.start_at and window.start_at and window.start_at < self.start_at:
+                raise ValueError("每日开始不能早于行程出发时间")
+            if deadline and window.end_at and window.end_at > deadline:
+                raise ValueError("每日结束不能晚于行程总期限")
         return self
 
     @field_validator("start_at", mode="before")

@@ -275,6 +275,8 @@ async def schedule(
     max_combinations=3,
     parent_plan=None,
     supplemental_candidates=None,
+    end_place=None,
+    return_origin=None,
 ):
     """Return suggestions; only the caller owns network budgets, persistence and adoption."""
     if type(max_combinations) is not int or not 1 <= max_combinations <= 3:
@@ -418,6 +420,19 @@ async def schedule(
     cities = {
         (item["poi"].get("city") or "").strip().removesuffix("市") for item in items
     }
+    if end_place:
+        endpoint_poi = Poi.model_validate(end_place["poi"])
+        if (
+            not endpoint_poi.id
+            or not endpoint_poi.name
+            or endpoint_poi.location is None
+        ):
+            return empty(
+                "draft", [_issue("endpoint_unavailable", "指定终点缺少确认地点")]
+            )
+        cities.add((endpoint_poi.city or "").strip().removesuffix("市"))
+    if not cities and return_origin and origin.city:
+        cities.add(origin.city.strip().removesuffix("市"))
     if "" in cities or not cities:
         return empty("draft", [_issue("city_unknown", "无法核对活动所属城市")])
     if len(cities) != 1:
@@ -1296,8 +1311,15 @@ async def schedule(
             cursor = None if locked_late else finish
 
         endpoint = None
-        if planning.return_to_origin:
-            endpoint = (ConfirmedOrigin.model_validate(frozen["origin"]).location, None)
+        if end_place:
+            endpoint = (end_place["poi"]["location"], end_place["candidate_id"])
+        elif planning.return_to_origin:
+            endpoint = (
+                ConfirmedOrigin.model_validate(
+                    return_origin or frozen["origin"]
+                ).location,
+                None,
+            )
         elif planning.end_candidate_id:
             end_item = next(
                 (
@@ -1313,7 +1335,9 @@ async def schedule(
                 )
             else:
                 endpoint = (end_item["poi"]["location"], end_item["candidate_id"])
-        if endpoint and (endpoint[0] != position or endpoint[1] != from_id):
+        if endpoint and (
+            endpoint[0] != position or (endpoint[1] != from_id and end_place is None)
+        ):
             if cursor is not None and not budget_exhausted:
                 await route_to(*endpoint, appointment=deadline is not None)
             else:

@@ -4,10 +4,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .discovery_tasks import DiscoveryBudget, DiscoveryUsage
-from .models import Identifier, Model, Version
+from .models import ConfirmedOrigin, DayWindow, Identifier, Model, TripRequest, Version
 
 PLAN_STAGES = ("planning_input", "routing", "scheduled")
 
@@ -48,8 +48,18 @@ class PlanningCheckpoint(Model):
         return self
 
 
+class DayPlan(DayWindow):
+    origin: ConfirmedOrigin | None = None
+    endpoint: ConfirmedOrigin | None = None
+    lodging_candidate_id: Identifier | None = None
+    itinerary: list[dict] = Field(default_factory=list, max_length=300)
+    unknowns: list[dict] = Field(default_factory=list, max_length=300)
+    conflicts: list[dict] = Field(default_factory=list, max_length=300)
+
+
 class PlanPayload(Model):
     input: dict
+    days: list[DayPlan] = Field(default_factory=list, max_length=14)
     supplements: list[dict] = Field(default_factory=list, max_length=4)
     itinerary: list[dict] = Field(default_factory=list, max_length=300)
     unknowns: list[dict] = Field(default_factory=list, max_length=300)
@@ -58,10 +68,31 @@ class PlanPayload(Model):
     diff: list[dict] = Field(default_factory=list, max_length=300)
     valid_until: datetime | None = None
 
+    @model_serializer(mode="wrap")
+    def omit_legacy_days(self, handler):
+        result = handler(self)
+        if not self.days:
+            result.pop("days", None)
+        return result
+
     @model_validator(mode="after")
     def validity_time(self):
         if self.valid_until is not None and self.valid_until.utcoffset() is None:
             raise ValueError("路线有效期限必须包含时区")
+        if self.days and (
+            self.itinerary != [step for day in self.days for step in day.itinerary]
+            or any(
+                step.get("date") != day.date.isoformat()
+                for day in self.days
+                for step in day.itinerary
+            )
+        ):
+            raise ValueError("按日安排必须与完整行程逐项一致")
+        windows = TripRequest.model_validate(self.input["request"]).planning.day_windows
+        if windows and [day.date for day in self.days] != [
+            window.date for window in windows
+        ]:
+            raise ValueError("按日安排必须覆盖全部明确的日期窗口")
         return self
 
 

@@ -8,8 +8,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from ..domain.planning import PLAN_STAGES, PlanPayload, SavePlan
 from ..integrations.amap import Amap, AmapBudgetExceeded, AmapError
+from ..services.day_planning import schedule
 from ..services.meals import supplement_meals
-from ..services.planning import schedule
 from ..services.routes import RouteProvider
 from .discovery import DiscoveryRunner
 
@@ -275,7 +275,7 @@ class PlanningRunner(DiscoveryRunner):
                         output = {
                             "plan_ids": [plan["id"] for plan in plans],
                             "input_hash": run["params"]["input_hash"],
-                            "summary": f"已保存 {len(plans)} 个有限单日建议；采用前仍须核对未知事项",
+                            "summary": f"已保存 {len(plans)} 个有限{'多日' if run['params']['request']['planning'].get('day_windows') else '单日'}建议；采用前仍须核对未知事项",
                             "partial": not plans
                             or all(
                                 plan["status"] in {"draft", "partial", "conflict"}

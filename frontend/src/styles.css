@@ -285,6 +285,12 @@ input[type="datetime-local"] { font-size: 11px; padding-left: 8px; padding-right
 .poi-match small { display: block; margin-top: 5px; font-size: 9px; }
 .focused-candidate { border-color: #9d7c43; background: #faf5e6; }
 .planning-generation { margin: 18px 0; }
+.planning-multiday, .planning-day-window, .planning-night { margin: 14px 0; padding: 12px; border: 1px solid #dfe6d5; border-radius: 8px; }
+.planning-night > p, .planning-day-window > p { margin-top: 8px; font-size: 11px; line-height: 1.9; color: #617455; }
+.planning-day-context { margin: 16px 0; padding: 12px; background: #f5f7ef; border-radius: 8px; }
+.planning-day-context h5 { font-size: 13px; margin: 0 0 9px; }
+.planning-day-context p, .planning-day-context details { font-size: 11px; line-height: 1.9; margin-top: 8px; color: #617455; }
+.planning-day-context blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid #b5c6a4; white-space: pre-wrap; }
 .planning-progress { margin: 16px 0; padding: 12px; border: 1px solid #dfe6d5; border-radius: 8px; color: #617455; font-size: 11px; }
 .planning-progress summary { cursor: pointer; }
 .planning-progress p { margin: 9px 0; line-height: 1.9; }

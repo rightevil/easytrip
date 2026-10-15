@@ -18,10 +18,81 @@ def planning_hash(value):
         key: value[key]
         for key in ("trip_id", "request", "origin", "selected_ids", "selected")
     }
+    if value.get("lodgings"):
+        content["lodgings"] = value["lodgings"]
     return hashlib.sha256(encode(content).encode("utf-8")).hexdigest()
 
 
 class PlanningStore:
+    def _freeze_planning_place(self, connection, trip_id, candidate, mentions, poi):
+        mention_ids = {item["id"] for item in mentions}
+        activities = [
+            self._entity(item, Activity)
+            for item in connection.execute(
+                "SELECT * FROM activities WHERE trip_id=? AND run_id=?",
+                (trip_id, candidate["run_id"]),
+            )
+            if item["mention_id"] in mention_ids
+        ]
+        evidence = []
+        for evidence_id in candidate["evidence_ids"]:
+            item = connection.execute(
+                "SELECT * FROM evidence WHERE trip_id=? AND run_id=? AND id=?",
+                (trip_id, candidate["run_id"], evidence_id),
+            ).fetchone()
+            if item is not None:
+                evidence.append(self._entity(item, Evidence))
+        source_ids = list(
+            dict.fromkeys(
+                [item["source_id"] for item in mentions]
+                + [item["source_id"] for item in evidence]
+            )
+        )
+        return {
+            "candidate_id": candidate["id"],
+            "name": candidate["name"],
+            "category": candidate["category"],
+            "kind": candidate["kind"],
+            **({"source": "user"} if candidate.get("source") == "user" else {}),
+            "city": poi["city"],
+            "run_id": candidate["run_id"],
+            "poi": poi,
+            "activities": activities,
+            "mentions": mentions,
+            "sources": [
+                {
+                    key: value
+                    for key, value in self._source(
+                        connection, trip_id, source_id, candidate["run_id"]
+                    ).items()
+                    if key not in {"first_read_at", "last_read_at"}
+                }
+                for source_id in source_ids
+            ],
+            "evidence": evidence,
+        }
+
+    def _planning_lodging(self, connection, trip_id, identifier):
+        from .database import NotFound
+
+        try:
+            candidate, mentions = self._candidate_for_places(
+                connection, trip_id, identifier
+            )
+        except NotFound:
+            return None
+        match = self._place_match(connection, trip_id, identifier)
+        if (
+            candidate["category"] != "stay"
+            or candidate["kind"] != "place"
+            or not match
+            or match.status != "unique"
+        ):
+            return None
+        return self._freeze_planning_place(
+            connection, trip_id, candidate, mentions, match.poi.model_dump(mode="json")
+        )
+
     def planning_replacements(self, trip_id):
         from .database import NotFound
 
@@ -301,53 +372,10 @@ class PlanningStore:
                 gap(
                     "city_unknown", "所选地点所属城市未知，无法校验单城交通", identifier
                 )
-            mention_ids = {item["id"] for item in mentions}
-            activities = [
-                self._entity(item, Activity)
-                for item in connection.execute(
-                    "SELECT * FROM activities WHERE trip_id=? AND run_id=?",
-                    (trip_id, candidate["run_id"]),
-                )
-                if item["mention_id"] in mention_ids
-            ]
-            evidence = []
-            for evidence_id in candidate["evidence_ids"]:
-                item = connection.execute(
-                    "SELECT * FROM evidence WHERE trip_id=? AND run_id=? AND id=?",
-                    (trip_id, candidate["run_id"], evidence_id),
-                ).fetchone()
-                if item is not None:
-                    evidence.append(self._entity(item, Evidence))
-            source_ids = list(
-                dict.fromkeys(
-                    [item["source_id"] for item in mentions]
-                    + [item["source_id"] for item in evidence]
-                )
-            )
             selected.append(
-                {
-                    "candidate_id": identifier,
-                    "name": candidate["name"],
-                    "category": candidate["category"],
-                    "kind": candidate["kind"],
-                    **({"source": "user"} if candidate.get("source") == "user" else {}),
-                    "city": poi["city"],
-                    "run_id": candidate["run_id"],
-                    "poi": poi,
-                    "activities": activities,
-                    "mentions": mentions,
-                    "sources": [
-                        {
-                            key: value
-                            for key, value in self._source(
-                                connection, trip_id, source_id, candidate["run_id"]
-                            ).items()
-                            if key not in {"first_read_at", "last_read_at"}
-                        }
-                        for source_id in source_ids
-                    ],
-                    "evidence": evidence,
-                }
+                self._freeze_planning_place(
+                    connection, trip_id, candidate, mentions, poi
+                )
             )
         if trip["active_plan_id"]:
             adopted = self._plan(
@@ -392,13 +420,33 @@ class PlanningStore:
             "missing": missing,
             "active_plan_id": trip["active_plan_id"],
         }
+        lodgings = [
+            place
+            for identifier in dict.fromkeys(
+                stay.candidate_id for stay in request.planning.overnight_stays
+            )
+            if (place := self._planning_lodging(connection, trip_id, identifier))
+        ]
+        if lodgings:
+            value["lodgings"] = lodgings
         value["input_hash"] = planning_hash(value)
         return value
 
     def planning_input(self, trip_id):
         with self.connection() as connection:
             connection.execute("BEGIN")
-            return self._planning_input(connection, trip_id)
+            value = self._planning_input(connection, trip_id)
+            if value["request"]["planning"].get("day_windows"):
+                value["lodging_candidates"] = [
+                    place
+                    for row in self._place_match_rows(connection, trip_id)
+                    if (
+                        place := self._planning_lodging(
+                            connection, trip_id, row["candidate_id"]
+                        )
+                    )
+                ]
+            return value
 
     @staticmethod
     def _plan(row):
@@ -555,6 +603,7 @@ class PlanningStore:
                 or not plan["payload"]["itinerary"]
             ):
                 raise OperationConflict("缺输入、部分结果或冲突方案不能采用")
+            self._validate_daily_adoption(plan["payload"], current)
             valid_until = plan["payload"].get("valid_until")
             if not valid_until or datetime.fromisoformat(valid_until) <= datetime.now(
                 timezone.utc
@@ -694,3 +743,124 @@ class PlanningStore:
                 "plan": plan,
                 "operation_applied": True,
             }
+
+    @staticmethod
+    def _validate_daily_adoption(payload, current):
+        from ..integrations.amap import _location
+        from .database import OperationConflict
+
+        request = TripRequest.model_validate(current["request"])
+        windows = request.planning.day_windows
+        if not windows:
+            if payload.get("days"):
+                raise OperationConflict("多日快照与当前每日条件不一致")
+            return
+        days = payload.get("days", [])
+        if [day["date"] for day in days] != [
+            window.date.isoformat() for window in windows
+        ] or payload["itinerary"] != [
+            step for day in days for step in day["itinerary"]
+        ]:
+            raise OperationConflict("方案未完整保留每日窗口与行程快照")
+        hotels = {place["candidate_id"]: place for place in current.get("lodgings", [])}
+        nights = {
+            stay.date: hotels.get(stay.candidate_id)
+            for stay in request.planning.overnight_stays
+        }
+        dates = {
+            item.candidate_id: item.date
+            for item in request.planning.activity_constraints
+        }
+
+        def same_location(actual, expected):
+            return _location(f"{actual[0]},{actual[1]}") == _location(
+                f"{expected[0]},{expected[1]}"
+            )
+
+        def same_anchor(actual, expected):
+            return bool(
+                actual
+                and expected
+                and same_location(actual["location"], expected["location"])
+                and actual.get("poi_id") == expected.get("poi_id")
+            )
+
+        def hotel_anchor(hotel):
+            poi = hotel["poi"]
+            return {"location": poi["location"], "poi_id": poi["id"]}
+
+        for index, (day, window) in enumerate(zip(days, windows)):
+            if (
+                window.start_at is None
+                or window.end_at is None
+                or not day.get("start_at")
+                or not day.get("end_at")
+                or datetime.fromisoformat(day["start_at"]) != window.start_at
+                or datetime.fromisoformat(day["end_at"]) != window.end_at
+            ):
+                raise OperationConflict("每日时间窗口未完整确认或已经改变")
+            previous_hotel = nights.get(windows[index - 1].date) if index else None
+            expected_origin = (
+                hotel_anchor(previous_hotel)
+                if previous_hotel
+                else current["origin"]
+                if index == 0
+                else None
+            )
+            if not same_anchor(day.get("origin"), expected_origin):
+                raise OperationConflict("每日起点必须来自原始起点或前一晚明确酒店")
+            if index < len(windows) - 1:
+                hotel = nights.get(window.date)
+                if (
+                    not hotel
+                    or day.get("lodging_candidate_id") != hotel["candidate_id"]
+                    or not same_anchor(day.get("endpoint"), hotel_anchor(hotel))
+                ):
+                    raise OperationConflict("每一晚必须保留明确酒店与前日终点")
+            elif request.planning.return_to_origin and not same_anchor(
+                day.get("endpoint"), current["origin"]
+            ):
+                raise OperationConflict("末日返程必须回到全行程原始起点")
+            position = day["origin"]["location"]
+            cursor = window.start_at
+            for step in day["itinerary"]:
+                if (
+                    step.get("date") != day["date"]
+                    or not step.get("start_at")
+                    or not step.get("end_at")
+                ):
+                    raise OperationConflict("每日活动或交通缺少明确日期和时间")
+                begin, end = (
+                    datetime.fromisoformat(step["start_at"]),
+                    datetime.fromisoformat(step["end_at"]),
+                )
+                if begin < cursor or end > window.end_at or end < begin:
+                    raise OperationConflict("每日安排超出用户明确的时间窗口")
+                cursor = end
+                if step["kind"] == "activity":
+                    assigned = dates.get(step["candidate_id"])
+                    # Meal supplements carry an explicit dated meal window instead of a user activity constraint.
+                    if assigned is None:
+                        supplement = next(
+                            (
+                                item
+                                for item in payload.get("supplements", [])
+                                if item["candidate_id"] == step["candidate_id"]
+                            ),
+                            None,
+                        )
+                        if not supplement or not supplement.get("meal_window"):
+                            raise OperationConflict("每日活动没有明确日期分配")
+                    elif assigned.isoformat() != day["date"]:
+                        raise OperationConflict("方案活动日期与用户分配不一致")
+                    if not same_location(position, step["poi"]["location"]):
+                        raise OperationConflict("每日活动缺少连续的到达接驳")
+                    position = step["poi"]["location"]
+                elif step["kind"] == "route":
+                    if not same_location(step["leg"]["origin"], position):
+                        raise OperationConflict("每日接驳路线与真实起点不连续")
+                    position = step["leg"]["destination"]
+            if not day.get("endpoint") or not same_location(
+                position, day["endpoint"]["location"]
+            ):
+                raise OperationConflict("每日结束地点缺少已计算的连续接驳")

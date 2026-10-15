@@ -5,6 +5,7 @@ import type { Coordinate } from './amap';
 export type Provenance = 'user' | 'source' | 'estimated' | 'unknown';
 export interface ActivityConstraint {
   candidate_id: string;
+  date?: string | null;
   duration_minutes: number | null;
   duration_source: Provenance;
   cost_cny: number | null;
@@ -18,6 +19,8 @@ export interface ActivityConstraint {
   not_after: string | null;
 }
 export interface PlanningConstraints {
+  day_windows?: DayWindow[];
+  overnight_stays?: OvernightStay[];
   origin_city?: string | null;
   progress_at?: string | null;
   progress_origin?: ConfirmedOrigin | null;
@@ -31,14 +34,16 @@ export interface PlanningConstraints {
   transfer_buffer_minutes: number;
   activity_constraints: ActivityConstraint[];
 }
+export interface DayWindow { date: string; start_at: string | null; end_at: string | null }
+export interface OvernightStay { date: string; candidate_id: string }
 export const defaultPlanning: PlanningConstraints = { timezone: 'Asia/Shanghai', progress_at: null, progress_origin: null, dietary_restrictions: [], return_to_origin: false, end_candidate_id: null, end_at: null, max_walk_meters: null, disabled_modes: [], transfer_buffer_minutes: 10, activity_constraints: [] };
 export const newConstraint = (candidate_id: string): ActivityConstraint => ({ candidate_id, duration_minutes: null, duration_source: 'unknown', cost_cny: null, cost_source: 'unknown', required: false, excluded: false, locked: false, state: 'pending', fixed_start_at: null, not_before: null, not_after: null });
-export interface PlanningIssue { code: string; message: string; candidate_id?: string; period?: 'lunch' | 'dinner'; window_start?: string; window_end?: string; meal_window?: MealSupplement['meal_window']; anchor?: { name?: string | null; address?: string | null; city?: string | null }; relaxations?: string[] }
+export interface PlanningIssue { code: string; message: string; candidate_id?: string; date?: string; period?: 'lunch' | 'dinner'; window_start?: string; window_end?: string; meal_window?: MealSupplement['meal_window']; anchor?: { name?: string | null; address?: string | null; city?: string | null }; relaxations?: string[] }
 export interface PlanningPlace { candidate_id: string; name: string; category: 'eat' | 'play' | 'stay'; kind: string; city: string | null; run_id: string | null; source?: 'user'; poi: Poi; activities: Record<string, unknown>[]; sources: Record<string, unknown>[]; evidence: Record<string, unknown>[]; mentions: Record<string, unknown>[] }
 export interface MealSupplement extends PlanningPlace { meal_window: { period: 'lunch' | 'dinner'; start_at: string; end_at: string; anchor_candidate_id: string }; constraint: Partial<ActivityConstraint> }
 export interface PlanningReplacements { trip_id: string; request_version: number; workspace_version: number; candidates: { candidate_id: string; name: string; category: PlanningPlace['category']; poi: Poi }[] }
 export interface PlanningReplacement { operation_id: string; expected_version: number; expected_workspace_version: number; input_hash: string; candidate_id: string; replacement_id: string }
-export interface PlanningInput { trip_id?: string; request_version: number; input_hash: string; request: TripRequest; planning: PlanningConstraints; origin: ConfirmedOrigin | null; selected_ids: string[]; selected: PlanningPlace[]; missing: PlanningIssue[]; active_plan_id: string | null }
+export interface PlanningInput { trip_id?: string; request_version: number; input_hash: string; request: TripRequest; planning: PlanningConstraints; origin: ConfirmedOrigin | null; selected_ids: string[]; selected: PlanningPlace[]; lodging_candidates?: PlanningPlace[]; lodgings?: PlanningPlace[]; missing: PlanningIssue[]; active_plan_id: string | null }
 export interface PlanningBudget { max_routes: number; max_combinations: number; max_seconds: number }
 export const defaultPlanningBudget: PlanningBudget = { max_routes: 40, max_combinations: 3, max_seconds: 600 };
 export interface PlanningResult { plan_ids: string[]; input_hash: string; summary: string; missing?: PlanningIssue[] }
@@ -66,5 +71,6 @@ export interface RouteLeg {
 export interface RouteItem { kind: 'route'; start_at: string | null; end_at: string | null; from_candidate_id?: string | null; to_candidate_id?: string | null; leg: RouteLeg; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
 export interface ActivityItem { kind: 'activity'; candidate_id: string; name: string; poi: Poi; category: 'eat' | 'play' | 'stay'; start_at: string | null; end_at: string | null; duration_minutes: number | null; duration_source: Provenance; cost_cny: number | null; cost_source: Provenance; state: ActivityConstraint['state']; locked: boolean; required: boolean; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
 export interface WaitItem { kind: 'wait'; start_at: string | null; end_at: string | null; reason: string; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
-export type ItineraryItem = RouteItem | ActivityItem | WaitItem;
-export interface Plan { id: string; trip_id: string; version: number; request_version: number; input_hash: string; parent_plan_id: string | null; run_id: string | null; status: 'draft' | 'conditional' | 'partial' | 'conflict' | 'validated'; created_at: string; payload: { input: PlanningInput; supplements?: MealSupplement[]; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[]; usage: Record<string, unknown>; diff: Record<string, unknown>[]; valid_until: string | null } }
+export type ItineraryItem = (RouteItem | ActivityItem | WaitItem) & { date?: string };
+export interface DayPlan { date: string; start_at: string | null; end_at: string | null; origin: ConfirmedOrigin | null; endpoint: ConfirmedOrigin | null; lodging_candidate_id: string | null; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[] }
+export interface Plan { id: string; trip_id: string; version: number; request_version: number; input_hash: string; parent_plan_id: string | null; run_id: string | null; status: 'draft' | 'conditional' | 'partial' | 'conflict' | 'validated'; created_at: string; payload: { input: PlanningInput; days?: DayPlan[]; supplements?: MealSupplement[]; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[]; usage: Record<string, unknown>; diff: Record<string, unknown>[]; valid_until: string | null } }
