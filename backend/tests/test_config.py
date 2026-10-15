@@ -1,12 +1,18 @@
 import asyncio
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from easytrip import config
-from easytrip.config import Settings, direct_client, validate_url
+from easytrip.config import (
+    Settings,
+    configure_transport_logging,
+    direct_client,
+    validate_url,
+)
 
 
 def test_agnes_aliases_are_case_insensitive_and_settings_repr_is_safe(
@@ -103,6 +109,71 @@ def test_redact_keeps_usage_and_removes_credentials_urls_and_contact_data():
     assert result["samples"][0]["text"] == "[REDACTED] [REDACTED] [URL] [PHONE] [EMAIL]"
     assert "web-secret" not in json.dumps(result)
     assert payload["xsecToken"] == "unregistered-token"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "api_key",
+        "apiKey",
+        "X-API-Key",
+        "access_token",
+        "accessToken",
+        "refreshToken",
+        "password",
+        "client_secret",
+        "Cookies",
+    ],
+)
+@pytest.mark.parametrize(
+    "secret", ["not-in-config", {"session": "not-in-config"}, ["not-in-config"]]
+)
+def test_redact_unknown_credential_fields_for_every_json_value_type(name, secret):
+    payload = {name: secret, "usage": {"model_tokens": 31}, "dedupe_key": "note:123"}
+    redacted = Settings().redact(payload)
+    assert redacted[name] == "[REDACTED]"
+    assert "not-in-config" not in json.dumps(redacted)
+    assert redacted["usage"] == payload["usage"]
+    assert redacted["dedupe_key"] == payload["dedupe_key"]
+    assert payload[name] == secret
+
+
+def test_transport_logging_never_formats_provider_body_urls_or_traceback(
+    monkeypatch, caplog
+):
+    previous = logging.getLogRecordFactory()
+    monkeypatch.setattr(logging, "_logRecordFactory", previous)
+    configure_transport_logging()
+    installed = logging.getLogRecordFactory()
+    configure_transport_logging()
+    assert logging.getLogRecordFactory() is installed
+    logger = logging.getLogger("mcp.client.streamable_http")
+    with caplog.at_level(logging.DEBUG):
+        logger.warning(
+            "Raw result: %s", {"comment": "private-comment", "token": "unknown-secret"}
+        )
+        try:
+            raise RuntimeError("https://service.invalid/mcp?key=unknown-secret")
+        except RuntimeError:
+            logger.exception("Request failed", stack_info=True)
+        logging.getLogger("httpx").info(
+            "HTTP Request: GET https://service.invalid/?token=unknown-secret"
+        )
+        logging.getLogger("easytrip.test").warning("run 123 stopped: budget")
+    text = caplog.text
+    assert all(
+        value not in text
+        for value in (
+            "private-comment",
+            "unknown-secret",
+            "service.invalid",
+            "Traceback",
+            "Stack (most recent",
+        )
+    )
+    assert "mcp.client.streamable_http WARNING: TransportEvent" in text
+    assert "RuntimeError" in text
+    assert "run 123 stopped: budget" in text
 
 
 def test_real_http_client_ignores_proxy_environment(monkeypatch):

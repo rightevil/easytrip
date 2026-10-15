@@ -8,10 +8,10 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
-from jsonschema import ValidationError as SchemaError
-from jsonschema import validate
+from jsonschema import SchemaError, ValidationError
 
 from ..domain.discovery import SourceComment, SourceNote
+from ..integrations.mcp_schema import validate_arguments
 from ..integrations.model import image_url
 from ..integrations.xhs import (
     READ_ONLY,
@@ -321,8 +321,8 @@ class CollectionService:
         if any(field not in schema.get("properties", {}) for field in required_fields):
             raise self._paused("source_schema_incompatible")
         try:
-            validate(arguments, schema)
-        except SchemaError:
+            validate_arguments(arguments, schema)
+        except (SchemaError, ValidationError, ValueError):
             raise self._paused("source_schema_incompatible") from None
         return arguments
 

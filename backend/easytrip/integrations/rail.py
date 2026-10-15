@@ -7,11 +7,11 @@ import re
 from datetime import date as Date
 from datetime import datetime, time, timedelta, timezone
 
-from jsonschema import validate
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from ..config import validate_url
+from .mcp_schema import validate_arguments
 
 READ_ONLY = frozenset({"get-station-code-by-names", "get-tickets"})
 CHINA = timezone(timedelta(hours=8))
@@ -175,9 +175,12 @@ async def search_rail(
                     async def call(name, arguments):
                         if name not in READ_ONLY:
                             raise RailError("铁路工具不在只读白名单")
-                        if '"$ref"' in json.dumps(tools[name].inputSchema):
-                            raise RailError("12306 MCP 工具参数定义不支持外部引用")
-                        validate(arguments, tools[name].inputSchema)
+                        try:
+                            validate_arguments(arguments, tools[name].inputSchema)
+                        except ValueError:
+                            raise RailError(
+                                "12306 MCP 工具参数定义包含不可解析的引用"
+                            ) from None
                         return _result_json(await session.call_tool(name, arguments))
 
                     stations = await call(

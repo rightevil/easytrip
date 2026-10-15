@@ -20,7 +20,14 @@ from .api.places import make_router as make_places_router
 from .api.planning import make_router as make_planning_router
 from .api.runs import make_router as make_runs_router
 from .api.trips import make_router as make_trips_router
-from .config import DATA_DIR, EXPORT_DIR, ROOT_DIR, Settings, direct_client
+from .config import (
+    DATA_DIR,
+    EXPORT_DIR,
+    ROOT_DIR,
+    Settings,
+    configure_transport_logging,
+    direct_client,
+)
 from .storage.database import Database
 
 
@@ -31,6 +38,7 @@ def create_app(
     database_path: Path | None = None,
     frontend_dir: Path = ROOT_DIR / "frontend" / "dist",
 ):
+    configure_transport_logging()
     settings = settings or Settings.load()
     database = Database(
         database_path
@@ -43,9 +51,13 @@ def create_app(
         database.initialize()
         async with direct_client() as client:
             application.state.http = client
+
             async def planning_gate():
                 await _before_amap_request(application)
-            executor.planning = PlanningRunner(database, settings, client=client, before_request=planning_gate)
+
+            executor.planning = PlanningRunner(
+                database, settings, client=client, before_request=planning_gate
+            )
             await executor.start()
             try:
                 yield
@@ -75,7 +87,9 @@ def create_app(
         return await call_next(request)
 
     application.mount(
-        "/assets", StaticFiles(directory=frontend_dir / "assets", check_dir=False), name="assets"
+        "/assets",
+        StaticFiles(directory=frontend_dir / "assets", check_dir=False),
+        name="assets",
     )
 
     @application.get("/")

@@ -7,12 +7,12 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import httpx
-from jsonschema import validate
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 
 from ..config import validate_url
+from .mcp_schema import validate_arguments
 
 READ_ONLY = frozenset({"check_login_status", "search_feeds", "get_feed_detail"})
 
@@ -50,7 +50,7 @@ class ReadOnlyMCP:
             raise PermissionError("工具不在只读白名单")
         if name not in self.tools:
             raise ValueError("服务未提供必要只读工具")
-        validate(arguments, self.tools[name].inputSchema)
+        validate_arguments(arguments, self.tools[name].inputSchema)
         async with self.lock:
             for attempt in range(3):
                 self.calls.append({"tool": name, "attempt": attempt + 1})

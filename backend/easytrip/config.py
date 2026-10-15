@@ -1,5 +1,6 @@
 """Backend-only configuration. Never serialize Settings to a browser or a report."""
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -64,9 +65,10 @@ class Settings:
             return {
                 key: (
                     "[REDACTED]"
-                    if isinstance(item, str)
-                    and re.fullmatch(
-                        r"xsec_?token|cookie|authorization|secret|secure|avatar|user_id|nickname",
+                    if re.fullmatch(
+                        r"xsec_?token|cookies?|authorization|(?:x[-_]?)?api[-_]?key|"
+                        r"(?:access|refresh|id)[-_]?token|password|passwd|client[-_]?secret|"
+                        r"secret|secure|avatar|user_id|nickname",
                         key,
                         re.I,
                     )
@@ -92,6 +94,27 @@ def direct_client(**kwargs):
         follow_redirects=False,
         **kwargs,
     )
+
+
+def configure_transport_logging():
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, "_easytrip_safe", False):
+        return
+
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
+        if record.name == "mcp" or record.name.startswith(
+            ("mcp.", "httpx", "httpcore")
+        ):
+            # Provider logs may contain raw responses and credential URLs; usage stays in SQLite.
+            error = record.exc_info[0].__name__ if record.exc_info else "TransportEvent"
+            record.msg = f"{record.name} {record.levelname}: {error}"
+            record.args = ()
+            record.exc_info = record.exc_text = record.stack_info = None
+        return record
+
+    factory._easytrip_safe = True
+    logging.setLogRecordFactory(factory)
 
 
 def validate_url(url: str):
