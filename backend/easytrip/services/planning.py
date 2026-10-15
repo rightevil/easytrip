@@ -733,7 +733,12 @@ async def schedule(
         if not constraints[item["candidate_id"]].excluded
         and constraints[item["candidate_id"]].state == "pending"
     ]
-    if not items and not historical:
+    if (
+        not items
+        and not historical
+        and end_place is None
+        and not (return_origin and planning.return_to_origin)
+    ):
         return empty(
             "draft", [_issue("pending_selection_missing", "没有需要排程的活动")]
         )

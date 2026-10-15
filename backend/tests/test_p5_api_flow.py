@@ -47,7 +47,13 @@ def workspace(tmp_path, monkeypatch):
                 200, json={"status": "1", "count": "1", "pois": [poi]}
             )
         if request.url.path == "/v3/config/district":
-            return httpx.Response(200, json=district_payload())
+            city = request.url.params.get("keywords", "")
+            return httpx.Response(
+                200,
+                json=district_payload("上海市", "021")
+                if "上海" in city
+                else district_payload(),
+            )
         assert "direction" in request.url.path
         return walking_response(request)
 
@@ -109,7 +115,7 @@ def prepare(client, pois, count, *, missing_last_hotel=False):
             url + "/places/manual/search",
             params={
                 "expected_version": 1,
-                "city": "杭州",
+                "city": poi["cityname"].removesuffix("市"),
                 "query": poi["name"],
             },
         )

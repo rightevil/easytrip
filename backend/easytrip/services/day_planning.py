@@ -65,6 +65,18 @@ async def schedule(
     supplemental_candidates=None,
 ):
     request = TripRequest.model_validate(input["request"])
+    from . import rail_planning
+
+    if request.planning.rail_segments or (
+        request.planning.day_windows and rail_planning.cross_city(input)
+    ):
+        return await rail_planning.schedule(
+            input,
+            route_provider,
+            max_combinations=max_combinations,
+            parent_plan=parent_plan,
+            supplemental_candidates=supplemental_candidates,
+        )
     if not request.planning.day_windows:
         return await single_day.schedule(
             input,

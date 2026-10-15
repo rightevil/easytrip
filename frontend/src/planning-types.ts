@@ -19,6 +19,7 @@ export interface ActivityConstraint {
   not_after: string | null;
 }
 export interface PlanningConstraints {
+  rail_segments?: RailSegment[];
   day_windows?: DayWindow[];
   overnight_stays?: OvernightStay[];
   origin_city?: string | null;
@@ -36,6 +37,7 @@ export interface PlanningConstraints {
 }
 export interface DayWindow { date: string; start_at: string | null; end_at: string | null }
 export interface OvernightStay { date: string; candidate_id: string }
+export interface RailSegment { id: string; date: string; departure_station_id: string | null; arrival_station_id: string | null; train_number: string | null; departure_at: string | null; arrival_at: string | null; confirmed: boolean; source: 'user'; boarding_buffer_minutes: number; arrival_buffer_minutes: number; cost_cny: number | null }
 export const defaultPlanning: PlanningConstraints = { timezone: 'Asia/Shanghai', progress_at: null, progress_origin: null, dietary_restrictions: [], return_to_origin: false, end_candidate_id: null, end_at: null, max_walk_meters: null, disabled_modes: [], transfer_buffer_minutes: 10, activity_constraints: [] };
 export const newConstraint = (candidate_id: string): ActivityConstraint => ({ candidate_id, duration_minutes: null, duration_source: 'unknown', cost_cny: null, cost_source: 'unknown', required: false, excluded: false, locked: false, state: 'pending', fixed_start_at: null, not_before: null, not_after: null });
 export interface PlanningIssue { code: string; message: string; candidate_id?: string; date?: string; period?: 'lunch' | 'dinner'; window_start?: string; window_end?: string; meal_window?: MealSupplement['meal_window']; anchor?: { name?: string | null; address?: string | null; city?: string | null }; relaxations?: string[] }
@@ -45,7 +47,7 @@ export interface LodgingSupplement extends PlanningPlace { category: 'stay'; lod
 export type PlanningSupplement = MealSupplement | LodgingSupplement;
 export interface PlanningReplacements { trip_id: string; request_version: number; workspace_version: number; candidates: { candidate_id: string; name: string; category: PlanningPlace['category']; poi: Poi }[] }
 export interface PlanningReplacement { operation_id: string; expected_version: number; expected_workspace_version: number; input_hash: string; candidate_id: string; replacement_id: string }
-export interface PlanningInput { trip_id?: string; request_version: number; input_hash: string; request: TripRequest; planning: PlanningConstraints; origin: ConfirmedOrigin | null; selected_ids: string[]; selected: PlanningPlace[]; lodging_candidates?: PlanningPlace[]; lodgings?: PlanningPlace[]; missing: PlanningIssue[]; active_plan_id: string | null }
+export interface PlanningInput { trip_id?: string; request_version: number; input_hash: string; request: TripRequest; planning: PlanningConstraints; origin: ConfirmedOrigin | null; selected_ids: string[]; selected: PlanningPlace[]; lodging_candidates?: PlanningPlace[]; lodgings?: PlanningPlace[]; station_candidates?: PlanningPlace[]; stations?: PlanningPlace[]; missing: PlanningIssue[]; active_plan_id: string | null }
 export interface PlanningBudget { max_routes: number; max_combinations: number; max_seconds: number }
 export const defaultPlanningBudget: PlanningBudget = { max_routes: 40, max_combinations: 3, max_seconds: 600 };
 export interface PlanningResult { plan_ids: string[]; input_hash: string; summary: string; missing?: PlanningIssue[] }
@@ -73,6 +75,7 @@ export interface RouteLeg {
 export interface RouteItem { kind: 'route'; start_at: string | null; end_at: string | null; from_candidate_id?: string | null; to_candidate_id?: string | null; leg: RouteLeg; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
 export interface ActivityItem { kind: 'activity'; candidate_id: string; name: string; poi: Poi; category: 'eat' | 'play' | 'stay'; start_at: string | null; end_at: string | null; duration_minutes: number | null; duration_source: Provenance; cost_cny: number | null; cost_source: Provenance; state: ActivityConstraint['state']; locked: boolean; required: boolean; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
 export interface WaitItem { kind: 'wait'; start_at: string | null; end_at: string | null; reason: string; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
-export type ItineraryItem = (RouteItem | ActivityItem | WaitItem) & { date?: string };
-export interface DayPlan { date: string; start_at: string | null; end_at: string | null; origin: ConfirmedOrigin | null; endpoint: ConfirmedOrigin | null; lodging_candidate_id: string | null; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[] }
+export interface RailItem { kind: 'rail'; rail_id: string; train_number: string | null; start_at: string | null; end_at: string | null; departure_station: PlanningPlace | null; arrival_station: PlanningPlace | null; source: 'user'; confirmed: boolean; boarding_buffer_minutes: number; arrival_buffer_minutes: number; cost_cny: number | null; cost_source: Provenance; historical?: boolean; execution_unknown?: boolean; untravelled?: boolean }
+export type ItineraryItem = (RouteItem | ActivityItem | WaitItem | RailItem) & { date?: string };
+export interface DayPlan { date: string; start_at: string | null; end_at: string | null; origin: ConfirmedOrigin | null; endpoint: ConfirmedOrigin | null; lodging_candidate_id: string | null; overnight_rail_id?: string | null; continuing_rail_id?: string | null; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[] }
 export interface Plan { id: string; trip_id: string; version: number; request_version: number; input_hash: string; parent_plan_id: string | null; run_id: string | null; status: 'draft' | 'conditional' | 'partial' | 'conflict' | 'validated'; created_at: string; payload: { input: PlanningInput; days?: DayPlan[]; supplements?: PlanningSupplement[]; itinerary: ItineraryItem[]; unknowns: PlanningIssue[]; conflicts: PlanningIssue[]; usage: Record<string, unknown>; diff: Record<string, unknown>[]; valid_until: string | null } }

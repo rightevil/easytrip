@@ -120,7 +120,58 @@ class OvernightStay(Model):
     candidate_id: Identifier
 
 
+class RailSegment(Model):
+    id: Identifier
+    date: LocalDate
+    departure_station_id: Identifier | None = None
+    arrival_station_id: Identifier | None = None
+    train_number: Name | None = None
+    departure_at: datetime | None = None
+    arrival_at: datetime | None = None
+    confirmed: bool = Field(default=False, strict=True)
+    source: Literal["user"] = "user"
+    boarding_buffer_minutes: int = Field(default=30, strict=True, ge=0, le=240)
+    arrival_buffer_minutes: int = Field(default=20, strict=True, ge=0, le=240)
+    cost_cny: (
+        Annotated[float, Field(strict=True, ge=0, le=10000000, allow_inf_nan=False)]
+        | None
+    ) = None
+
+    @field_validator("departure_at", "arrival_at")
+    @classmethod
+    def aware_times(cls, value):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("铁路时刻必须带时区")
+        return value
+
+    @model_validator(mode="after")
+    def confirmed_timetable(self):
+        if (
+            self.departure_at
+            and self.arrival_at
+            and self.arrival_at <= self.departure_at
+        ):
+            raise ValueError("铁路到达时刻必须晚于出发时刻，跨日需填写实际日期")
+        if (
+            self.departure_station_id
+            and self.departure_station_id == self.arrival_station_id
+        ):
+            raise ValueError("铁路出发站和到达站不能相同")
+        if self.confirmed and not all(
+            (
+                self.departure_station_id,
+                self.arrival_station_id,
+                self.train_number.strip() if self.train_number else None,
+                self.departure_at,
+                self.arrival_at,
+            )
+        ):
+            raise ValueError("确认铁路前必须明确两站、车次与完整时刻")
+        return self
+
+
 class PlanningConstraints(Model):
+    rail_segments: list[RailSegment] = Field(default_factory=list, max_length=28)
     day_windows: list[DayWindow] = Field(default_factory=list, max_length=14)
     overnight_stays: list[OvernightStay] = Field(default_factory=list, max_length=13)
     progress_at: datetime | None = None
@@ -145,7 +196,7 @@ class PlanningConstraints(Model):
     @model_serializer(mode="wrap")
     def omit_single_day_defaults(self, handler):
         result = handler(self)
-        for field in ("day_windows", "overnight_stays"):
+        for field in ("day_windows", "overnight_stays", "rail_segments"):
             if not getattr(self, field):
                 result.pop(field, None)
         return result
@@ -174,6 +225,23 @@ class PlanningConstraints(Model):
 
         zone = ZoneInfo(self.timezone)
         dates = [window.date for window in self.day_windows]
+        rail_ids = [rail.id for rail in self.rail_segments]
+        if len(set(rail_ids)) != len(rail_ids):
+            raise ValueError("铁路段标识不能重复")
+        for rail in self.rail_segments:
+            if dates and (
+                rail.date not in dates
+                or (
+                    rail.arrival_at
+                    and rail.arrival_at.astimezone(zone).date() not in dates
+                )
+            ):
+                raise ValueError("铁路出发和到达必须由每日窗口覆盖")
+            if (
+                rail.departure_at
+                and rail.departure_at.astimezone(zone).date() != rail.date
+            ):
+                raise ValueError("铁路出发时刻必须属于所填本地日期")
         if any(
             right != left + timedelta(days=1) for left, right in zip(dates, dates[1:])
         ):
@@ -248,7 +316,41 @@ class TripRequest(Model):
                 raise ValueError("每日开始不能早于行程出发时间")
             if deadline and window.end_at and window.end_at > deadline:
                 raise ValueError("每日结束不能晚于行程总期限")
+        for rail in self.planning.rail_segments:
+            if (
+                self.start_at
+                and rail.departure_at
+                and rail.departure_at < self.start_at
+            ):
+                raise ValueError("铁路出发不能早于行程开始")
+            if deadline and rail.arrival_at and rail.arrival_at > deadline:
+                raise ValueError("铁路到达不能晚于行程总期限")
         return self
+
+    def planning_windows(self):
+        """Only a same-local-day trip has an unambiguous implicit window."""
+        from zoneinfo import ZoneInfo
+
+        if self.planning.day_windows:
+            return self.planning.day_windows
+        deadline = self.planning.end_at
+        if self.start_at and self.duration_minutes is not None:
+            end = self.start_at + timedelta(minutes=self.duration_minutes)
+            deadline = min(end, deadline) if deadline else end
+        zone = ZoneInfo(self.planning.timezone)
+        if (
+            not self.start_at
+            or not deadline
+            or self.start_at.astimezone(zone).date() != deadline.astimezone(zone).date()
+        ):
+            return []
+        return [
+            DayWindow(
+                date=self.start_at.astimezone(zone).date(),
+                start_at=self.start_at,
+                end_at=deadline,
+            )
+        ]
 
     @field_validator("start_at", mode="before")
     @classmethod

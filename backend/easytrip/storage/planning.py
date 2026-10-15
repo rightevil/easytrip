@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from ..domain.discovery import Activity, Evidence
@@ -18,8 +18,9 @@ def planning_hash(value):
         key: value[key]
         for key in ("trip_id", "request", "origin", "selected_ids", "selected")
     }
-    if value.get("lodgings"):
-        content["lodgings"] = value["lodgings"]
+    for field in ("lodgings", "stations"):
+        if value.get(field):
+            content[field] = value[field]
     return hashlib.sha256(encode(content).encode("utf-8")).hexdigest()
 
 
@@ -72,7 +73,7 @@ class PlanningStore:
             "evidence": evidence,
         }
 
-    def _planning_lodging(self, connection, trip_id, identifier):
+    def _planning_place(self, connection, trip_id, identifier, category="stay"):
         from .database import NotFound
 
         try:
@@ -83,7 +84,7 @@ class PlanningStore:
             return None
         match = self._place_match(connection, trip_id, identifier)
         if (
-            candidate["category"] != "stay"
+            (category is not None and candidate["category"] != category)
             or candidate["kind"] != "place"
             or not match
             or match.status != "unique"
@@ -390,7 +391,9 @@ class PlanningStore:
                 ] not in {value["candidate_id"] for value in selected}:
                     selected.append(item)
                     cities.add(item["poi"]["city"].removesuffix("市"))
-        if len(cities) > 1:
+        if len(cities) > 1 and not (
+            request.planning.day_windows or request.planning.rail_segments
+        ):
             gap("cross_city", "P4 只校验单城单日；跨城行程需要后续阶段")
         selected_ids = {item["candidate_id"] for item in selected}
         for constraint in request.planning.activity_constraints:
@@ -425,10 +428,26 @@ class PlanningStore:
             for identifier in dict.fromkeys(
                 stay.candidate_id for stay in request.planning.overnight_stays
             )
-            if (place := self._planning_lodging(connection, trip_id, identifier))
+            if (place := self._planning_place(connection, trip_id, identifier))
         ]
         if lodgings:
             value["lodgings"] = lodgings
+        stations = [
+            place
+            for identifier in dict.fromkeys(
+                identifier
+                for rail in request.planning.rail_segments
+                for identifier in (rail.departure_station_id, rail.arrival_station_id)
+                if identifier
+            )
+            if (
+                place := self._planning_place(
+                    connection, trip_id, identifier, category=None
+                )
+            )
+        ]
+        if stations:
+            value["stations"] = stations
         value["input_hash"] = planning_hash(value)
         return value
 
@@ -441,11 +460,24 @@ class PlanningStore:
                     place
                     for row in self._place_match_rows(connection, trip_id)
                     if (
-                        place := self._planning_lodging(
+                        place := self._planning_place(
                             connection, trip_id, row["candidate_id"]
                         )
                     )
                 ]
+            value["station_candidates"] = [
+                place
+                for row in self._place_match_rows(connection, trip_id)
+                if (
+                    place := self._planning_place(
+                        connection, trip_id, row["candidate_id"], category=None
+                    )
+                )
+                and any(
+                    kind in (place["poi"].get("type") or "")
+                    for kind in ("火车站", "铁路客运")
+                )
+            ]
             return value
 
     @staticmethod
@@ -750,6 +782,8 @@ class PlanningStore:
         from .database import OperationConflict
 
         request = TripRequest.model_validate(current["request"])
+        if request.planning.rail_segments:
+            return PlanningStore._validate_rail_adoption(payload, current)
         windows = request.planning.day_windows
         if not windows:
             if payload.get("days"):
@@ -864,3 +898,261 @@ class PlanningStore:
                 position, day["endpoint"]["location"]
             ):
                 raise OperationConflict("每日结束地点缺少已计算的连续接驳")
+
+    @staticmethod
+    def _validate_rail_adoption(payload, current):
+        from zoneinfo import ZoneInfo
+
+        from ..integrations.amap import _location
+        from .database import OperationConflict
+
+        request = TripRequest.model_validate(current["request"])
+        windows = request.planning_windows()
+        rails = {rail.id: rail for rail in request.planning.rail_segments}
+        stations = {
+            place["candidate_id"]: place for place in current.get("stations", [])
+        }
+        hotels = {place["candidate_id"]: place for place in current.get("lodgings", [])}
+        stays = {
+            stay.date: hotels.get(stay.candidate_id)
+            for stay in request.planning.overnight_stays
+        }
+        constraints = {
+            item.candidate_id: item for item in request.planning.activity_constraints
+        }
+        zone = ZoneInfo(request.planning.timezone)
+        days = payload.get("days", [])
+        if (
+            not windows
+            or [day["date"] for day in days]
+            != [day.date.isoformat() for day in windows]
+            or payload["itinerary"]
+            != [step for day in days for step in day["itinerary"]]
+        ):
+            raise OperationConflict("铁路方案必须完整覆盖每日窗口")
+
+        def location_equal(left, right):
+            return (
+                left is not None
+                and right is not None
+                and _location(f"{left[0]},{left[1]}")
+                == _location(f"{right[0]},{right[1]}")
+            )
+
+        def location(anchor):
+            return anchor.get("location") if anchor else None
+
+        seen = set()
+        for index, (day, window) in enumerate(zip(days, windows)):
+            if (
+                window.start_at is None
+                or window.end_at is None
+                or not day.get("start_at")
+                or not day.get("end_at")
+                or datetime.fromisoformat(day["start_at"]) != window.start_at
+                or datetime.fromisoformat(day["end_at"]) != window.end_at
+            ):
+                raise OperationConflict("铁路日窗未明确或已经改变")
+            carry = next(
+                (
+                    rail
+                    for rail in rails.values()
+                    if rail.confirmed
+                    and rail.departure_at.astimezone(zone).date()
+                    < window.date
+                    <= rail.arrival_at.astimezone(zone).date()
+                ),
+                None,
+            )
+            if carry and day.get("continuing_rail_id") != carry.id:
+                raise OperationConflict("跨日铁路未保留相邻日关联")
+            if carry and carry.arrival_at.astimezone(zone).date() > window.date:
+                if (
+                    day["itinerary"]
+                    or day.get("origin")
+                    or day.get("endpoint")
+                    or day.get("overnight_rail_id") != carry.id
+                ):
+                    raise OperationConflict("仍在铁路上的日期不能伪造市内起终点和活动")
+                continue
+            previous = stays.get(windows[index - 1].date) if index else None
+            expected_origin = (
+                stations[carry.arrival_station_id]["poi"]
+                if carry
+                else current["origin"]
+                if index == 0
+                else previous["poi"]
+                if previous
+                else None
+            )
+            if not location_equal(
+                location(day.get("origin")), location(expected_origin)
+            ):
+                raise OperationConflict("铁路日计划起点与前日酒店或到达站不连续")
+            position = expected_origin["location"]
+            cursor = (
+                max(
+                    window.start_at,
+                    carry.arrival_at + timedelta(minutes=carry.arrival_buffer_minutes),
+                )
+                if carry
+                else window.start_at
+            )
+            ready_at = cursor
+            outgoing = None
+            for step in day["itinerary"]:
+                if (
+                    step.get("date") != day["date"]
+                    or not step.get("start_at")
+                    or not step.get("end_at")
+                ):
+                    raise OperationConflict("铁路行程项目缺少明确日期与时刻")
+                begin, end = (
+                    datetime.fromisoformat(step["start_at"]),
+                    datetime.fromisoformat(step["end_at"]),
+                )
+                if (
+                    begin.utcoffset() is None
+                    or end.utcoffset() is None
+                    or begin < cursor
+                    or end < begin
+                ):
+                    raise OperationConflict("铁路与接驳时序重叠或缺少时区")
+                if step["kind"] == "rail":
+                    rail = rails.get(step.get("rail_id"))
+                    if (
+                        not rail
+                        or rail.id in seen
+                        or not rail.confirmed
+                        or begin != rail.departure_at
+                        or end != rail.arrival_at
+                        or step.get("train_number") != rail.train_number
+                        or step.get("source") != "user"
+                        or not step.get("confirmed")
+                        or any(
+                            step.get(field) != getattr(rail, field)
+                            for field in (
+                                "boarding_buffer_minutes",
+                                "arrival_buffer_minutes",
+                                "cost_cny",
+                            )
+                        )
+                    ):
+                        raise OperationConflict(
+                            "铁路必须与唯一的用户确认班次、时刻、缓冲和费用一致"
+                        )
+                    departure, arrival = (
+                        stations.get(rail.departure_station_id),
+                        stations.get(rail.arrival_station_id),
+                    )
+                    if (
+                        not departure
+                        or not arrival
+                        or step.get("departure_station") != departure
+                        or step.get("arrival_station") != arrival
+                        or not location_equal(position, departure["poi"]["location"])
+                    ):
+                        raise OperationConflict("铁路两端必须保留真实车站及连续接驳")
+                    previous_steps = day["itinerary"][: day["itinerary"].index(step)]
+                    arriving = next(
+                        (
+                            value
+                            for value in reversed(previous_steps)
+                            if value["kind"] != "wait"
+                        ),
+                        None,
+                    )
+                    reached_at = (
+                        datetime.fromisoformat(arriving["end_at"])
+                        if arriving
+                        else window.start_at
+                    )
+                    if reached_at > begin - timedelta(
+                        minutes=rail.boarding_buffer_minutes
+                    ):
+                        raise OperationConflict("到站接驳未预留用户设置的进站缓冲")
+                    seen.add(rail.id)
+                    position = arrival["poi"]["location"]
+                    if end.astimezone(zone).date() > window.date:
+                        outgoing = rail
+                    cursor = end
+                    ready_at = end + timedelta(minutes=rail.arrival_buffer_minutes)
+                else:
+                    if end > window.end_at:
+                        raise OperationConflict("市内安排超出当日日窗")
+                    if step["kind"] == "route":
+                        if begin < ready_at or not location_equal(
+                            position, step["leg"]["origin"]
+                        ):
+                            raise OperationConflict("铁路两端市内接驳不连续")
+                        position = step["leg"]["destination"]
+                    elif step["kind"] == "activity":
+                        constraint = constraints.get(step["candidate_id"])
+                        supplement = next(
+                            (
+                                place
+                                for place in payload.get("supplements", [])
+                                if place["candidate_id"] == step["candidate_id"]
+                                and place.get("meal_window")
+                            ),
+                            None,
+                        )
+                        date_valid = bool(
+                            constraint
+                            and (
+                                not request.planning.day_windows
+                                or (
+                                    constraint.date
+                                    and constraint.date.isoformat() == day["date"]
+                                )
+                            )
+                        )
+                        if supplement:
+                            meal = supplement["meal_window"]
+                            date_valid = (
+                                datetime.fromisoformat(meal["start_at"])
+                                <= begin
+                                <= end
+                                <= datetime.fromisoformat(meal["end_at"])
+                            )
+                        if (
+                            begin < ready_at
+                            or not date_valid
+                            or not location_equal(position, step["poi"]["location"])
+                        ):
+                            raise OperationConflict("铁路活动日期或到达接驳不一致")
+                    elif step["kind"] != "wait":
+                        raise OperationConflict("铁路方案包含未知项目")
+                    cursor = end
+            if outgoing:
+                if (
+                    day.get("overnight_rail_id") != outgoing.id
+                    or day.get("lodging_candidate_id")
+                    or day.get("endpoint")
+                ):
+                    raise OperationConflict(
+                        "跨日铁路日期不得伪造酒店或当晚已到达的终点"
+                    )
+            else:
+                expected_endpoint = (
+                    stays.get(window.date) if index < len(windows) - 1 else None
+                )
+                if index < len(windows) - 1 and (
+                    not expected_endpoint
+                    or day.get("lodging_candidate_id")
+                    != expected_endpoint["candidate_id"]
+                ):
+                    raise OperationConflict("非铁路过夜必须明确每晚酒店")
+                endpoint = (
+                    expected_endpoint["poi"]
+                    if expected_endpoint
+                    else current["origin"]
+                    if request.planning.return_to_origin
+                    else day.get("endpoint")
+                )
+                if not location_equal(
+                    location(day.get("endpoint")), location(endpoint)
+                ) or not location_equal(position, location(endpoint)):
+                    raise OperationConflict("铁路日计划结束地点未取得连续接驳")
+        if seen != set(rails):
+            raise OperationConflict("铁路方案遗漏用户明确的班次")

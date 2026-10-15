@@ -154,12 +154,15 @@ def test_daily_adoption_accepts_normalized_coordinates_and_rejects_broken_connec
         PlanningStore._validate_daily_adoption(payload, value)
 
 
-def test_different_city_hotel_is_a_conflict_without_requesting_a_cross_city_amap_route():
+def test_different_city_hotel_needs_reliable_rail_without_a_cross_city_amap_route():
     value = multiday(2)
     value["lodgings"][0]["poi"]["city"] = "上海市"
     provider = Routes()
     result = run(value, provider)
-    assert result["status"] == "conflict"
+    assert result["status"] == "partial"
+    assert "rail_timetable_unknown" in {
+        issue["code"] for issue in result["payload"]["unknowns"]
+    }
     assert not any(
         call[2] == value["lodgings"][0]["poi"]["location"] for call in provider.calls
     )

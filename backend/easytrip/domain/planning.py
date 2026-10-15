@@ -49,12 +49,22 @@ class PlanningCheckpoint(Model):
 
 
 class DayPlan(DayWindow):
+    overnight_rail_id: Identifier | None = None
+    continuing_rail_id: Identifier | None = None
     origin: ConfirmedOrigin | None = None
     endpoint: ConfirmedOrigin | None = None
     lodging_candidate_id: Identifier | None = None
     itinerary: list[dict] = Field(default_factory=list, max_length=300)
     unknowns: list[dict] = Field(default_factory=list, max_length=300)
     conflicts: list[dict] = Field(default_factory=list, max_length=300)
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_rail_defaults(self, handler):
+        result = handler(self)
+        for field in ("overnight_rail_id", "continuing_rail_id"):
+            if getattr(self, field) is None:
+                result.pop(field, None)
+        return result
 
 
 class PlanPayload(Model):

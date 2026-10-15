@@ -17,7 +17,8 @@ export function MultiDayEditor({ planning, input, disabled, onChange }: { planni
     const nights = remaining.slice(0, -1).map(day => day.date);
     onChange({ day_windows: remaining, overnight_stays: stays.filter(stay => nights.includes(stay.date)), activity_constraints: planning.activity_constraints.map(constraint => constraint.date === windows.at(-1)?.date ? { ...constraint, date: null } : constraint) });
   };
-  const lastProtected = planning.activity_constraints.some(constraint => constraint.date === windows.at(-1)?.date && (constraint.locked || constraint.state === 'completed'));
+  const railUsesLastDate = planning.rail_segments?.some(rail => rail.date === windows.at(-1)?.date || rail.arrival_at && new Intl.DateTimeFormat('sv-SE', { timeZone: planning.timezone }).format(new Date(rail.arrival_at)) === windows.at(-1)?.date);
+  const lastProtected = railUsesLastDate || planning.activity_constraints.some(constraint => constraint.date === windows.at(-1)?.date && (constraint.locked || constraint.state === 'completed'));
   return <fieldset className="planning-multiday" disabled={disabled}><legend>多日窗口与逐晚酒店（可选）</legend>
     <p className="discovery-note">单日行程可保持此处为空。多日请逐日明确窗口并为活动分配日期；空时间保持未知，不自动推定酒店入住、退房或行李寄存时间。规划时区：{planning.timezone}。</p>
     {!windows.length ? <div className="planning-progress-actions"><label>首日日期<input type="date" value={firstDate} onChange={event => setFirstDate(event.target.value)} /></label><button disabled={!firstDate} onClick={() => onChange({ day_windows: [{ date: firstDate, start_at: null, end_at: null }] })}>添加首日日窗</button></div> : <>

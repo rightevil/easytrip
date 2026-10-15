@@ -220,3 +220,21 @@ it('keeps lodging suggestions read-only when their exact POI is unavailable', as
   expect(region.getByRole('button', { name: '选择为这一晚酒店' }).matches(':disabled')).toBe(true);
   expect(api.update).not.toHaveBeenCalled();
 });
+
+it('shows cross-midnight railway separately from city geometry and does not invent a hotel night', async () => {
+  const value = dailyPlan(2);
+  const rail = { kind: 'rail' as const, rail_id: 'night-train', train_number: '用户确认夜车', start_at: '2026-10-15T15:00:00Z', end_at: '2026-10-15T23:00:00Z', departure_station: place('出发站'), arrival_station: place('到达站'), source: 'user' as const, confirmed: true, boarding_buffer_minutes: 30, arrival_buffer_minutes: 20, cost_cny: null, cost_source: 'unknown' as const };
+  value.payload.days![0].overnight_rail_id = rail.rail_id;
+  value.payload.days![0].lodging_candidate_id = null;
+  value.payload.days![0].itinerary.push(rail);
+  value.payload.itinerary = value.payload.days!.flatMap(day => day.itinerary);
+  vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
+  render(<Planning session={session} archived={false} />);
+  expect(await screen.findByText('铁路 · 用户确认夜车')).toBeTruthy();
+  expect(screen.getByText(/本晚为跨日铁路在途：night-train/)).toBeTruthy();
+  expect(screen.queryByText('2026-10-15 晚缺少已核对酒店；翌日起点与住宿接驳仍未知。')).toBeNull();
+  expect(screen.getByText(/铁路段独立于高德市内路线/)).toBeTruthy();
+  expect(canvas.routes?.map(leg => leg.id)).toEqual(['route-15']);
+  expect(canvas.points.some(point => point.name === '出发站')).toBe(true);
+  expect(canvas.points.some(point => point.name === '到达站')).toBe(true);
+});
