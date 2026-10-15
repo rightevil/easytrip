@@ -1,6 +1,6 @@
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -67,6 +67,33 @@ def test_legacy_serialization_and_hash_remain_identical():
     assert "date" not in serialized["planning"]["activity_constraints"][0]
     extended = {**old, "lodgings": [], "lodging_candidates": multiday()["lodgings"]}
     assert planning_hash(extended) == planning_hash(old)
+
+
+def test_fourteen_elapsed_days_can_cover_fifteen_local_dates_and_fourteen_nights():
+    start = datetime.fromisoformat("2026-10-15T09:00:00+08:00")
+    windows = []
+    for index in range(15):
+        day = start + timedelta(days=index)
+        windows.append(
+            {
+                "date": day.date().isoformat(),
+                "start_at": day.replace(hour=8 if index == 14 else 9).isoformat(),
+                "end_at": day.replace(hour=9 if index == 14 else 18).isoformat(),
+            }
+        )
+    request = TripRequest(
+        start_at=start,
+        duration_minutes=20160,
+        planning={
+            "day_windows": windows,
+            "overnight_stays": [
+                {"date": day["date"], "candidate_id": "same-explicit-hotel"}
+                for day in windows[:-1]
+            ],
+        },
+    )
+    assert len(request.planning.day_windows) == 15
+    assert len(request.planning.overnight_stays) == 14
 
 
 @pytest.mark.parametrize(
@@ -181,3 +208,41 @@ def test_route_budget_is_shared_and_a_missing_day_never_silently_drops_an_overni
     result = run(value)
     assert result["status"] == "partial"
     assert result["payload"]["unknowns"][0]["code"] == "day_coverage_missing"
+
+
+def test_user_hotel_time_constraints_wait_or_report_conflict_instead_of_assuming_checkin_policy():
+    value = multiday(2)
+    stay = value["request"]["planning"]["overnight_stays"][0]
+    stay["check_in_not_before"] = "2026-10-15T14:00:00+08:00"
+    result = run(value)
+    assert result["status"] == "conditional"
+    assert (
+        result["payload"]["days"][0]["itinerary"][-1]["end_at"]
+        == stay["check_in_not_before"]
+    )
+    assert result["payload"]["days"][0]["itinerary"][-1]["source"] == "user"
+    stay["check_out_by"] = "2026-10-16T08:00:00+08:00"
+    result = run(value)
+    assert result["status"] == "conflict"
+    assert "lodging_checkout_conflict" in {
+        issue["code"] for issue in result["payload"]["conflicts"]
+    }
+    stay.pop("check_out_by")
+    stay["check_in_not_before"] = "2026-10-15T19:00:00+08:00"
+    assert run(value)["status"] == "conflict"
+
+
+def test_user_nightly_total_counts_towards_trip_budget_and_unknowns_are_not_serialized_as_zero():
+    value = multiday(2)
+    serialized = TripRequest.model_validate(value["request"]).model_dump(mode="json")
+    assert set(serialized["planning"]["overnight_stays"][0]) == {"date", "candidate_id"}
+    value["request"]["budget_cny"] = 50
+    value["request"]["planning"]["overnight_stays"][0]["nightly_cost_cny"] = 100
+    result = run(value)
+    assert result["status"] == "conflict"
+    assert result["payload"]["usage"]["known_cost_cny"] == 100
+    value["request"]["planning"]["overnight_stays"][0]["check_out_by"] = (
+        "2026-10-15T10:00:00+08:00"
+    )
+    with pytest.raises(ValidationError):
+        TripRequest.model_validate(value["request"])

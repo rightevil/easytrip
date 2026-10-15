@@ -36,7 +36,7 @@ export interface PlanningConstraints {
   activity_constraints: ActivityConstraint[];
 }
 export interface DayWindow { date: string; start_at: string | null; end_at: string | null }
-export interface OvernightStay { date: string; candidate_id: string }
+export interface OvernightStay { date: string; candidate_id: string; check_in_not_before?: string | null; check_out_by?: string | null; nightly_cost_cny?: number | null }
 export interface RailSegment { id: string; date: string; departure_station_id: string | null; arrival_station_id: string | null; train_number: string | null; departure_at: string | null; arrival_at: string | null; confirmed: boolean; source: 'user'; boarding_buffer_minutes: number; arrival_buffer_minutes: number; cost_cny: number | null }
 export const defaultPlanning: PlanningConstraints = { timezone: 'Asia/Shanghai', progress_at: null, progress_origin: null, dietary_restrictions: [], return_to_origin: false, end_candidate_id: null, end_at: null, max_walk_meters: null, disabled_modes: [], transfer_buffer_minutes: 10, activity_constraints: [] };
 export const newConstraint = (candidate_id: string): ActivityConstraint => ({ candidate_id, duration_minutes: null, duration_source: 'unknown', cost_cny: null, cost_source: 'unknown', required: false, excluded: false, locked: false, state: 'pending', fixed_start_at: null, not_before: null, not_after: null });

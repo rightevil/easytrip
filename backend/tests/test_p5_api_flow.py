@@ -395,3 +395,38 @@ def test_lodging_suggestion_only_becomes_a_dated_stay_after_explicit_edit_and_re
         )
         assert adopt(client, url, second)["trip"]["active_plan_id"] == second["id"]
         assert client.get(url + f"/plans/{first['id']}").json() == first
+
+
+def test_next_day_completed_history_can_be_adopted_and_reopened_without_rewriting_old_version(
+    workspace,
+):
+    open_client, pois, calls = workspace
+    with open_client() as client:
+        url, identifiers, windows = prepare(client, pois, 3)
+        first, _ = plan(client, url, calls)
+        adopt(client, url, first)
+        request = client.get(url).json()["request"]
+        request["planning"]["activity_constraints"][0]["state"] = "completed"
+        request["planning"].update(
+            progress_at=(
+                datetime.fromisoformat(windows[1]["start_at"]) + timedelta(hours=1)
+            ).isoformat(),
+            progress_origin={
+                "name": "用户确认当前位置",
+                "city": "杭州市",
+                "source": "map",
+                "location": [120.17, 30.27],
+            },
+        )
+        patch_request(client, url, request)
+        adjusted, _ = plan(client, url, calls, parent=first["id"])
+        assert adjusted["status"] == "conditional", adjusted["payload"]["conflicts"]
+        assert all(
+            step.get("historical")
+            for step in adjusted["payload"]["days"][0]["itinerary"]
+        )
+        assert adopt(client, url, adjusted)["trip"]["active_plan_id"] == adjusted["id"]
+        assert client.get(url + f"/plans/{first['id']}").json() == first
+    with open_client() as client:
+        assert client.get(url).json()["active_plan_id"] == adjusted["id"]
+        assert client.get(url + f"/plans/{first['id']}").json() == first

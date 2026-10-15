@@ -113,3 +113,15 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 `planning.progress_at/progress_origin` 必须成对，当前位置只能由用户明确提供地图坐标；保留原起点用于返程与整日期限。`dietary_restrictions` 不构成商家安全保证。完成、跳过和锁定从不可变当前方案检查；已发生历史与受影响后缀分开，只有未来路线要求当前有效，历史本身不可改写。未知历史移动不计算成确定步行或费用。旧版重新规划必须再次核对当前时间和进度。
 
 跨午晚餐的实际窗口触发同轮只读补查：最多 2 搜索、2 笔记、5 条评论、4 模型请求、0 图片，所有来源/模型请求沿用原账本，高德地点与路线共用 40 次额度。补充候选保存于 `payload.supplements`，不偷偷修改原选择或签名；排入时间表前重新校验路线和窗口。失败或额度用尽保留原路线和餐次缺口。Agnes 仍使用直接连接、thinking 与任务输出预算；未知结果不自动重放。
+
+## P5 多日、住宿与铁路
+
+复用原行程修改、规划 Run、版本查询和显式采用接口，不新增订房/售票接口。
+
+- `request.planning.day_windows` 为最多 15 个连续本地日期的 `{date,start_at,end_at}`，所有时刻带时区；与原 14 天时长上限一致，可涉及 15 个日历日期。活动约束可有 `date`，多日必须明确所属日。旧单日空默认不写入序列化或签名。
+- `overnight_stays` 最多 14 晚，逐项 `{date,candidate_id}`；日期只可为非末日窗口，候选需为本行程已唯一核对的具体住宿。可提供用户确认的 `check_in_not_before/check_out_by/nightly_cost_cny`，分别属于住宿日、次日和同行全组该晚费用；未提供的值保持未知，历史笔记价格不自动转入。
+- `rail_segments` 最多 28 段，稳定 `id/date`、`departure_station_id/arrival_station_id`、可空的 `train_number/departure_at/arrival_at`、`confirmed`、`source:user`、`boarding_buffer_minutes/arrival_buffer_minutes`、可空 `cost_cny`。确认前必须补齐两站、车次及完整带时区时刻；真实火车站 POI 与市内路线分别核对。没有可靠时刻只给部分条件草案。
+- `GET /api/trips/{id}/planning-input` 另提供只用于编辑的 `lodging_candidates/station_candidates`；不把整个未使用候选池冻结到 Run。实际引用的 `lodgings/stations` 进入签名，保持来源与真实 POI。
+- `payload.days` 保存当日起终点、窗口、住宿、活动、交通与问题，平坦 `itinerary` 仍保持逐项一致。`kind:rail` 使用用户确认时刻及两站资料，不伪装成高德 `RouteLeg`。跨午夜用 `overnight_rail_id/continuing_rail_id` 连接在途和到达日。
+- 住宿补查候选带 `lodging_window`（`date/anchor_candidate_id/anchor_name/anchor_location/city`），与餐饮共用 Run 预算，来源/POI 保存后仍须用户明确逐晚绑定并重排。房态、实时价格、办理时长和行李寄存未知时保留待核实项。
+- 重新规划按日比较语义输入，保留未受影响的日期和有效前缀；已完成/锁定和过去酒店/铁路不允许静默改写。执行中进度只接受当前采用父方案，历史交通计划的实际执行与费用没有确认时仍未知。采用继续核验版本、签名、有效期、逐日连续性、真实站点、时刻与缓冲。

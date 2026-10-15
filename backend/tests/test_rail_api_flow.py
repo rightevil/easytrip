@@ -83,8 +83,28 @@ def test_confirmed_rail_round_trip_keeps_station_sides_and_reopens_immutable_ver
         )
         assert client.get(url + f"/plans/{saved['id']}").json() == saved
         assert adopt(client, url, revised)["trip"]["active_plan_id"] == revised["id"]
+        request = client.get(url).json()["request"]
+        request["planning"]["activity_constraints"][0]["state"] = "completed"
+        request["planning"].update(
+            progress_at=(start + timedelta(hours=4)).isoformat(),
+            progress_origin={
+                "name": "用户确认当前位置",
+                "city": "上海市",
+                "source": "map",
+                "location": [121.32, 31.22],
+            },
+        )
+        patch_request(client, url, request)
+        resumed, _ = plan(client, url, calls, parent=revised["id"])
+        assert resumed["status"] == "conditional", resumed["payload"]["conflicts"]
+        historical = [
+            step for step in resumed["payload"]["itinerary"] if step.get("historical")
+        ]
+        assert historical and any(step["kind"] == "rail" for step in historical)
+        assert adopt(client, url, resumed)["trip"]["active_plan_id"] == resumed["id"]
+        assert client.get(url + f"/plans/{revised['id']}").json() == revised
         before = len(calls)
     with open_client() as client:
-        assert client.get(url).json()["active_plan_id"] == revised["id"]
+        assert client.get(url).json()["active_plan_id"] == resumed["id"]
         assert client.get(url + f"/plans/{saved['id']}").json() == saved
         assert len(calls) == before

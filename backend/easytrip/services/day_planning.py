@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 from ..domain.models import ConfirmedOrigin, TripRequest
 from ..storage.planning import planning_hash
 from . import planning as single_day
+from . import planning_adjustments as adjustments
+from .lodgings import check_stay
 
 
 def _anchor(place):
@@ -67,9 +69,7 @@ async def schedule(
     request = TripRequest.model_validate(input["request"])
     from . import rail_planning
 
-    if request.planning.rail_segments or (
-        request.planning.day_windows and rail_planning.cross_city(input)
-    ):
+    if request.planning.rail_segments or rail_planning.cross_city(input):
         return await rail_planning.schedule(
             input,
             route_provider,
@@ -123,56 +123,15 @@ async def schedule(
                 )
             ],
         )
-    if parent_plan:
-        single_day._parent_groups(parent_plan, frozen)
-        protected = any(
-            item.locked or item.state == "completed"
-            for item in planning.activity_constraints
-        )
-        protected |= any(
-            step.get("locked") or step.get("state") == "completed"
-            for step in parent_plan["payload"]["itinerary"]
-        )
-        if protected:
-            return _empty(
-                frozen,
-                request,
-                "conflict",
-                [
-                    _issue(
-                        "multiday_history_requires_review",
-                        "本切片尚不重排多日完成或锁定历史，原方案保留，请先核对相关日期",
-                    )
-                ],
-            )
-        if (
-            request.start_at < single_day._current_time()
-            and planning.progress_at is None
-        ):
-            return _empty(
-                frozen,
-                request,
-                "draft",
-                [
-                    _issue(
-                        "current_progress_required",
-                        "原出发时间已过，请明确当前位置与当前时间",
-                    )
-                ],
-            )
-    if planning.progress_at is not None:
+    adjustment = adjustments.prepare(frozen, parent_plan, request)
+    if adjustment["conflicts"] or adjustment["issues"]:
         return _empty(
             frozen,
             request,
-            "partial",
-            [
-                _issue(
-                    "multiday_progress_unsupported",
-                    "多日执行中恢复尚需核对历史与后续住宿，当前未重写原方案",
-                )
-            ],
+            "conflict" if adjustment["conflicts"] else "draft",
+            adjustment["conflicts"] or adjustment["issues"],
         )
-    if any(
+    if not parent_plan and any(
         item.locked or item.state == "completed"
         for item in planning.activity_constraints
     ):
@@ -180,12 +139,7 @@ async def schedule(
             frozen,
             request,
             "conflict",
-            [
-                _issue(
-                    "protected_snapshot_missing",
-                    "多日已完成或锁定项目必须保留可靠的原方案历史",
-                )
-            ],
+            [_issue("protected_snapshot_missing", "已完成或锁定项目需要可靠原方案")],
         )
 
     constraints = {item.candidate_id: item for item in planning.activity_constraints}
@@ -233,6 +187,7 @@ async def schedule(
     stays = {
         stay.date: lodgings.get(stay.candidate_id) for stay in planning.overnight_stays
     }
+    night_rules = {stay.date.isoformat(): stay for stay in planning.overnight_stays}
     supplemental_candidates = supplemental_candidates or []
     signatures, results = set(), []
     for combination in range(max_combinations):
@@ -257,6 +212,20 @@ async def schedule(
         incomplete = bool(unassigned)
         for index, (window, order) in enumerate(zip(windows, orders)):
             date = window.date.isoformat()
+            if date in adjustment["reused"]:
+                day = deepcopy(adjustment["reused"][date])
+                adjustments.add_usage(usage, day, request.participants)
+                days.append(day)
+                unknowns.extend(day["unknowns"])
+                conflicts.extend(day["conflicts"])
+                validity.extend(
+                    single_day._time(step["leg"]["valid_until"])
+                    for step in day["itinerary"]
+                    if step["kind"] == "route"
+                    and not step.get("historical")
+                    and step["leg"].get("valid_until")
+                )
+                continue
             hotel = stays.get(window.date) if index < len(windows) - 1 else None
             previous_hotel = stays.get(windows[index - 1].date) if index else None
             origin = (
@@ -282,6 +251,17 @@ async def schedule(
                 _anchor(end_place) if end_place else None,
                 hotel["candidate_id"] if hotel else None,
             )
+            if index:
+                check_stay(
+                    day,
+                    window,
+                    night_rules.get(windows[index - 1].date.isoformat()),
+                    checkout=True,
+                    progress_at=planning.progress_at
+                    if planning.progress_at
+                    and planning.progress_at.astimezone(zone).date() == window.date
+                    else None,
+                )
             if index < len(windows) - 1:
                 if not hotel:
                     incomplete = True
@@ -299,7 +279,7 @@ async def schedule(
                     day["unknowns"].append(
                         _issue(
                             "lodging_details_unverified",
-                            "酒店房态、当晚房价、入住/退房政策与行李寄存条件未知，未假定固定时间或免费",
+                            "酒店房态、平台实时可订价格、入住/退房办理时长与行李寄存条件未知，未假定固定时间或免费",
                             candidate_id=hotel["candidate_id"],
                             date=date,
                         )
@@ -356,6 +336,15 @@ async def schedule(
                     end_at=window.end_at.isoformat(),
                     day_windows=[window.model_dump(mode="json")],
                     overnight_stays=[],
+                    progress_at=planning.progress_at.isoformat()
+                    if planning.progress_at
+                    and planning.progress_at.astimezone(zone).date() == window.date
+                    else None,
+                    progress_origin=planning.progress_origin.model_dump(mode="json")
+                    if planning.progress_at
+                    and planning.progress_at.astimezone(zone).date() == window.date
+                    else None,
+                    origin_city=origin.get("city") or planning.origin_city,
                     end_candidate_id=None,
                     return_to_origin=index == len(windows) - 1
                     and planning.return_to_origin,
@@ -386,6 +375,9 @@ async def schedule(
                         daily,
                         route_provider,
                         max_combinations=1,
+                        parent_plan=adjustments.city_parent(
+                            parent_plan, adjustment["parents"].get(date)
+                        ),
                         end_place=end_place,
                         return_origin=frozen["origin"],
                         supplemental_candidates=supplements,
@@ -427,9 +419,38 @@ async def schedule(
                         )
                         if activity:
                             day["endpoint"] = _anchor({"poi": activity["poi"]})
+            if hotel:
+                check_stay(day, window, night_rules.get(window.date.isoformat()))
             days.append(day)
             unknowns.extend(day["unknowns"])
             conflicts.extend(day["conflicts"])
+        for field in (
+            "walking_distance_meters",
+            "known_cost_cny",
+            "estimated_cost_cny",
+            "unknown_cost_items",
+        ):
+            usage[field] = 0
+        usage["walking_known"] = True
+        for day in days:
+            for step in day["itinerary"]:
+                if step.get("historical") and step["kind"] == "route":
+                    step["execution_unknown"] = True
+            rule = night_rules.get(day["date"])
+            adjustments.add_usage(
+                usage,
+                day,
+                request.participants,
+                rule.nightly_cost_cny if rule else None,
+            )
+        if not validity:
+            incomplete = True
+            unknowns.append(
+                _issue(
+                    "no_future_schedule",
+                    "没有仍有效的未来交通段，历史保留但不声明可执行",
+                )
+            )
         if (
             planning.max_walk_meters is not None
             and usage["walking_distance_meters"] > planning.max_walk_meters
@@ -478,7 +499,8 @@ async def schedule(
                     "diff": [
                         _issue(
                             "multiday_recomputed",
-                            "按明确日期重新核对多日活动、酒店与接驳",
+                            "保留未受影响的日期与完成历史，重新核对相关日及下游接驳",
+                            reused_dates=list(adjustment["reused"]),
                         )
                     ]
                     if parent_plan

@@ -118,6 +118,27 @@ class DayWindow(Model):
 class OvernightStay(Model):
     date: LocalDate
     candidate_id: Identifier
+    check_in_not_before: datetime | None = None
+    check_out_by: datetime | None = None
+    nightly_cost_cny: (
+        Annotated[float, Field(strict=True, ge=0, le=10000000, allow_inf_nan=False)]
+        | None
+    ) = None
+
+    @field_validator("check_in_not_before", "check_out_by")
+    @classmethod
+    def aware_policy(cls, value):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("酒店确认时间必须带时区")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_unknown_policy(self, handler):
+        result = handler(self)
+        for field in ("check_in_not_before", "check_out_by", "nightly_cost_cny"):
+            if getattr(self, field) is None:
+                result.pop(field, None)
+        return result
 
 
 class RailSegment(Model):
@@ -172,8 +193,8 @@ class RailSegment(Model):
 
 class PlanningConstraints(Model):
     rail_segments: list[RailSegment] = Field(default_factory=list, max_length=28)
-    day_windows: list[DayWindow] = Field(default_factory=list, max_length=14)
-    overnight_stays: list[OvernightStay] = Field(default_factory=list, max_length=13)
+    day_windows: list[DayWindow] = Field(default_factory=list, max_length=15)
+    overnight_stays: list[OvernightStay] = Field(default_factory=list, max_length=14)
     progress_at: datetime | None = None
     progress_origin: ConfirmedOrigin | None = None
     dietary_restrictions: list[Annotated[str, Field(min_length=1, max_length=200)]] = (
@@ -255,6 +276,16 @@ class PlanningConstraints(Model):
         nights = [stay.date for stay in self.overnight_stays]
         if len(nights) != len(set(nights)) or not set(nights).issubset(dates[:-1]):
             raise ValueError("每晚酒店只能绑定一次，且必须属于非末日窗口")
+        for stay in self.overnight_stays:
+            if (
+                stay.check_in_not_before
+                and stay.check_in_not_before.astimezone(zone).date() != stay.date
+            ):
+                raise ValueError("入住最早时间必须属于绑定住宿日期")
+            if stay.check_out_by and stay.check_out_by.astimezone(
+                zone
+            ).date() != stay.date + timedelta(days=1):
+                raise ValueError("退房最晚时间必须属于住宿次日")
         for item in self.activity_constraints:
             if item.date and item.date not in dates:
                 raise ValueError("活动日期必须对应明确的每日窗口")

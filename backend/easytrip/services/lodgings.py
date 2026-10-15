@@ -6,6 +6,68 @@ from ..domain.models import TripRequest
 from .meals import _gap, _nearby, _supplement_places
 
 
+def check_stay(day, window, stay, *, checkout=False, progress_at=None):
+    """Validate explicit user policies; missing handling and storage times stay unknown."""
+    from datetime import datetime
+
+    if stay is None:
+        return
+    if checkout:
+        if stay.check_out_by:
+            if progress_at:
+                day["unknowns"].append(
+                    {
+                        "code": "checkout_execution_unknown",
+                        "date": day["date"],
+                        "message": "当前位置不证明已办理退房；须单独核实退房和行李状态",
+                    }
+                )
+            elif window.start_at and window.start_at > stay.check_out_by:
+                day["conflicts"].append(
+                    {
+                        "code": "lodging_checkout_conflict",
+                        "date": day["date"],
+                        "message": "当日开始已晚于用户确认的退房期限",
+                        "candidate_id": stay.candidate_id,
+                    }
+                )
+        return
+    if stay.check_in_not_before:
+        if window.end_at and stay.check_in_not_before > window.end_at:
+            day["conflicts"].append(
+                {
+                    "code": "lodging_checkin_conflict",
+                    "date": day["date"],
+                    "message": "用户确认的最早入住时间晚于当日日窗结束",
+                    "candidate_id": stay.candidate_id,
+                }
+            )
+            return
+        timed = [step for step in day["itinerary"] if step.get("end_at")]
+        if not timed:
+            day["unknowns"].append(
+                {
+                    "code": "checkin_arrival_unknown",
+                    "date": day["date"],
+                    "message": "酒店到达时间未知，不能确认入住衔接",
+                }
+            )
+            return
+        arrival = datetime.fromisoformat(timed[-1]["end_at"])
+        if arrival < stay.check_in_not_before:
+            day["itinerary"].append(
+                {
+                    "kind": "wait",
+                    "date": day["date"],
+                    "start_at": arrival.isoformat(),
+                    "end_at": stay.check_in_not_before.isoformat(),
+                    "reason": "等待用户确认的最早入住时间；办理时长和行李寄存仍需核实",
+                    "candidate_id": stay.candidate_id,
+                    "source": "user",
+                }
+            )
+
+
 def lodging_queries(frozen, suggestions):
     request = TripRequest.model_validate(frozen["request"])
     nights = {day.date.isoformat() for day in request.planning.day_windows[:-1]}

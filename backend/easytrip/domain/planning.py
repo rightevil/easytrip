@@ -69,7 +69,7 @@ class DayPlan(DayWindow):
 
 class PlanPayload(Model):
     input: dict
-    days: list[DayPlan] = Field(default_factory=list, max_length=14)
+    days: list[DayPlan] = Field(default_factory=list, max_length=15)
     supplements: list[dict] = Field(default_factory=list, max_length=4)
     itinerary: list[dict] = Field(default_factory=list, max_length=300)
     unknowns: list[dict] = Field(default_factory=list, max_length=300)

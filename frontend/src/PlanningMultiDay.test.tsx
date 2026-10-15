@@ -238,3 +238,48 @@ it('shows cross-midnight railway separately from city geometry and does not inve
   expect(canvas.points.some(point => point.name === '出发站')).toBe(true);
   expect(canvas.points.some(point => point.name === '到达站')).toBe(true);
 });
+
+it('shows a resumed location only on its own local date without replacing the saved daily origin', async () => {
+  const value = dailyPlan();
+  value.payload.input.planning.progress_at = '2026-10-16T02:00:00Z';
+  value.payload.input.planning.progress_origin = { name: '用户确认当前位置', city: '杭州市', location: [120.2, 30.3], source: 'map', poi_id: null, request_origin: null };
+  vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
+  render(<Planning session={session} archived={false} />);
+  await screen.findByRole('region', { name: '2026-10-15 日计划' });
+  expect(canvas.points.some(point => point.id === 'plan-progress-origin')).toBe(false);
+  await userEvent.selectOptions(screen.getByLabelText('查看日计划'), '2026-10-16');
+  expect(canvas.points.some(point => point.id === 'plan-progress-origin' && point.location[0] === 120.2)).toBe(true);
+  expect(canvas.points.find(point => point.origin)?.name).toBe('同名酒店');
+  expect(screen.getByText(/本日恢复从用户确认当前位置：用户确认当前位置/)).toBeTruthy();
+  await userEvent.selectOptions(screen.getByLabelText('查看日计划'), '2026-10-17');
+  expect(canvas.points.some(point => point.id === 'plan-progress-origin')).toBe(false);
+});
+
+it('does not add another marker when the daily endpoint is already a scheduled POI', async () => {
+  const value = dailyPlan(2);
+  const activity = place('activity-a');
+  value.payload.days![0].itinerary.push({ ...newConstraint('activity-a'), date: '2026-10-15', kind: 'activity', name: activity.name, category: 'play', poi: activity.poi, start_at: '2026-10-15T01:10:00Z', end_at: '2026-10-15T01:40:00Z' });
+  value.payload.days![0].endpoint = { name: activity.name, city: activity.city, source: 'amap', poi_id: activity.poi.id, location: activity.poi.location, request_origin: null };
+  value.payload.itinerary = value.payload.days!.flatMap(day => day.itinerary);
+  vi.mocked(api.plans).mockResolvedValue({ items: [value], active_plan_id: null });
+  render(<Planning session={session} archived={false} />);
+  await screen.findByRole('region', { name: '2026-10-15 日计划' });
+  expect(canvas.points.filter(point => point.id === activity.poi.id)).toHaveLength(1);
+  expect(canvas.points.some(point => point.id === 'day-endpoint')).toBe(false);
+});
+
+it('saves user-known hotel times and nightly total for only that night and clears them when the branch changes', async () => {
+  beginMultiDay();
+  render(<Planning session={session} archived={false} />);
+  await screen.findByRole('group', { name: 'activity-a' });
+  const first = within(screen.getByRole('group', { name: '2026-10-15 晚住宿' }));
+  await userEvent.selectOptions(first.getByLabelText('本晚酒店候选'), 'hotel-a');
+  fireEvent.change(first.getByLabelText('用户确认的最早入住（本机时区输入）'), { target: { value: '2026-10-15T14:00' } });
+  fireEvent.change(first.getByLabelText('用户确认的最晚退房（本机时区输入）'), { target: { value: '2026-10-16T10:00' } });
+  fireEvent.change(first.getByLabelText('用户确认本晚总费用（元，空值未知）'), { target: { value: '100' } });
+  await act(async () => { await session.flush(); });
+  expect(session.request.getSnapshot().value.request.planning?.overnight_stays).toEqual([{ date: '2026-10-15', candidate_id: 'hotel-a', check_in_not_before: new Date('2026-10-15T14:00').toISOString(), check_out_by: new Date('2026-10-16T10:00').toISOString(), nightly_cost_cny: 100 }]);
+  await userEvent.selectOptions(first.getByLabelText('本晚酒店候选'), 'hotel-b');
+  expect(session.request.getSnapshot().value.request.planning?.overnight_stays).toEqual([{ date: '2026-10-15', candidate_id: 'hotel-b' }]);
+  expect(api.startPlanning).not.toHaveBeenCalled();
+});

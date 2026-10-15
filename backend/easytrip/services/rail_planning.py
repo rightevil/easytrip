@@ -8,7 +8,9 @@ from ..domain.models import TripRequest
 from ..storage.planning import planning_hash
 from ..storage.routes import normalized_city
 from . import planning as city_planning
+from . import planning_adjustments as adjustments
 from .day_planning import _anchor, _day, _issue
+from .lodgings import check_stay
 
 
 def cross_city(frozen):
@@ -126,39 +128,22 @@ async def schedule(
                         candidate_id=identifier,
                     )
                 )
-    if parent_plan:
-        if parent_plan["trip_id"] != frozen["trip_id"] or parent_plan[
-            "input_hash"
-        ] != planning_hash(parent_plan["payload"]["input"]):
-            raise ValueError("铁路父方案归属或冻结签名无效")
-        if (
-            request.start_at
-            and request.start_at < city_planning._current_time()
-            and planning.progress_at is None
-        ):
-            problems.append(
-                _issue(
-                    "current_progress_required",
-                    "原出发时间已过，请明确当前位置与当前时间",
-                )
-            )
-        if any(
-            item.locked or item.state == "completed" for item in constraints.values()
-        ) or any(
-            item.get("locked") or item.get("state") == "completed"
-            for item in parent_plan["payload"]["itinerary"]
-        ):
-            conflicts.append(
-                _issue(
-                    "rail_history_requires_review",
-                    "跨日完成或锁定历史将在历史保护步骤核对，未改写原方案",
-                )
-            )
-    if planning.progress_at:
+    adjustment = adjustments.prepare(frozen, parent_plan, request)
+    problems.extend(adjustment["issues"])
+    conflicts.extend(adjustment["conflicts"])
+    if (
+        parent_plan
+        and planning.progress_at
+        and any(
+            rail.confirmed
+            and rail.departure_at < planning.progress_at < rail.arrival_at
+            for rail in rails
+        )
+    ):
         problems.append(
             _issue(
-                "rail_progress_requires_review",
-                "铁路执行中调整仍需核对原历史，当前保留草案",
+                "rail_in_progress_unverified",
+                "当前时间处于已确认班次的运行区间，实际乘车和到达状态未知；保留时刻与后续条件草案，请在到达后明确当前位置",
             )
         )
     if not parent_plan and any(
@@ -199,6 +184,70 @@ async def schedule(
                 for rail in rails
                 if rail.date.isoformat() == day["date"]
             )
+            if index < len(days) - 1:
+                overnight_rail = next(
+                    (
+                        rail
+                        for rail in rails
+                        if rail.confirmed
+                        and rail.departure_at
+                        and rail.arrival_at
+                        and rail.departure_at.astimezone(zone).date().isoformat()
+                        <= day["date"]
+                        < rail.arrival_at.astimezone(zone).date().isoformat()
+                    ),
+                    None,
+                )
+                if overnight_rail:
+                    day["overnight_rail_id"] = overnight_rail.id
+                else:
+                    stay = next(
+                        (
+                            stay
+                            for stay in planning.overnight_stays
+                            if stay.date.isoformat() == day["date"]
+                        ),
+                        None,
+                    )
+                    hotel = next(
+                        (
+                            place
+                            for place in frozen.get("lodgings", [])
+                            if stay and place["candidate_id"] == stay.candidate_id
+                        ),
+                        None,
+                    )
+                    if hotel:
+                        day.update(
+                            lodging_candidate_id=hotel["candidate_id"],
+                            endpoint=_anchor(hotel),
+                        )
+                        day["unknowns"].append(
+                            _issue(
+                                "lodging_details_unverified",
+                                "酒店房态、平台实时报价、办理和行李条件待核实，接驳尚未完成",
+                                date=day["date"],
+                            )
+                        )
+                    else:
+                        day["unknowns"].append(
+                            _issue(
+                                "lodging_gap",
+                                "本晚酒店尚未明确，铁路缺口不替代住宿缺口",
+                                date=day["date"],
+                                anchor=next(
+                                    (
+                                        step["poi"]
+                                        for step in reversed(day["itinerary"])
+                                        if step["kind"] == "activity"
+                                    ),
+                                    day.get("origin"),
+                                ),
+                                nights=1,
+                                price_status="unknown",
+                            )
+                        )
+            problems.extend(day["unknowns"])
         return [
             {
                 "status": "conflict" if conflicts else "partial",
@@ -253,6 +302,7 @@ async def schedule(
     stays = {
         stay.date: hotels.get(stay.candidate_id) for stay in planning.overnight_stays
     }
+    night_rules = {stay.date.isoformat(): stay for stay in planning.overnight_stays}
     results, seen = [], set()
     for combination in range(max_combinations):
         orders = [deepcopy(pool[min(combination, len(pool) - 1)][1]) for pool in pools]
@@ -283,6 +333,24 @@ async def schedule(
         for index, (window, order) in enumerate(zip(windows, orders)):
             day = _day(window)
             date = window.date.isoformat()
+            if date in adjustment["reused"]:
+                day = deepcopy(adjustment["reused"][date])
+                adjustments.add_usage(usage, day, request.participants)
+                days.append(day)
+                unknowns.extend(day["unknowns"])
+                current_conflicts.extend(day["conflicts"])
+                validity.extend(
+                    city_planning._time(step["leg"]["valid_until"])
+                    for step in day["itinerary"]
+                    if step["kind"] == "route"
+                    and not step.get("historical")
+                    and step["leg"].get("valid_until")
+                )
+                pending = next(
+                    (rail for rail in rails if rail.id == day.get("overnight_rail_id")),
+                    None,
+                )
+                continue
             previous_hotel = stays.get(windows[index - 1].date) if index else None
             origin = (
                 deepcopy(frozen["origin"])
@@ -317,9 +385,136 @@ async def schedule(
                 )
                 pending = None
             day["origin"] = deepcopy(origin)
+            if index and not day.get("continuing_rail_id"):
+                check_stay(
+                    day,
+                    window,
+                    night_rules.get(windows[index - 1].date.isoformat()),
+                    checkout=True,
+                    progress_at=planning.progress_at
+                    if planning.progress_at
+                    and planning.progress_at.astimezone(zone).date() == window.date
+                    else None,
+                )
+            progress_today = bool(
+                planning.progress_at
+                and planning.progress_at.astimezone(zone).date() == window.date
+            )
+            progress_consumed = False
+            passed_ids = set()
+            if progress_today and parent_plan:
+                old_day = adjustment["parents"].get(date)
+                old_rails = {
+                    rail.id: rail
+                    for rail in TripRequest.model_validate(
+                        parent_plan["payload"]["input"]["request"]
+                    ).planning.rail_segments
+                }
+                passed_ids = {
+                    rail.id
+                    for rail in old_rails.values()
+                    if rail.date == window.date
+                    and rail.arrival_at
+                    and rail.arrival_at <= planning.progress_at
+                }
+                current_rails = {rail.id: rail for rail in rails}
+                if any(
+                    identifier not in current_rails
+                    or current_rails[identifier] != old_rails[identifier]
+                    for identifier in passed_ids
+                ):
+                    day["conflicts"].append(
+                        _issue(
+                            "historical_rail_changed",
+                            "已经过去的铁路确认快照不能改写",
+                            date=date,
+                        )
+                    )
+                if passed_ids and old_day:
+                    cutoff = max(
+                        i
+                        for i, step in enumerate(old_day["itinerary"])
+                        if step["kind"] == "rail" and step["rail_id"] in passed_ids
+                    )
+                    while (
+                        cutoff + 1 < len(old_day["itinerary"])
+                        and old_day["itinerary"][cutoff + 1]["kind"] == "wait"
+                        and city_planning._time(
+                            old_day["itinerary"][cutoff + 1]["end_at"]
+                        )
+                        <= planning.progress_at
+                    ):
+                        cutoff += 1
+                    prefix = deepcopy(old_day["itinerary"][: cutoff + 1])
+                    done_ids = set()
+                    for step in prefix:
+                        step["historical"] = True
+                        if step["kind"] == "activity":
+                            item = constraints.get(step["candidate_id"])
+                            done_ids.add(step["candidate_id"])
+                            if item is None or item.state not in {
+                                "completed",
+                                "skipped",
+                            }:
+                                day["conflicts"].append(
+                                    _issue(
+                                        "historical_state_unconfirmed",
+                                        "过去铁路之前的活动仍未明确完成或跳过",
+                                        date=date,
+                                    )
+                                )
+                            else:
+                                step.update(
+                                    state=item.state,
+                                    locked=step.get("locked", False) or item.locked,
+                                    required=item.required,
+                                )
+                                if item.state == "skipped":
+                                    step.update(
+                                        execution_unknown=True, untravelled=True
+                                    )
+                        elif step["kind"] != "wait":
+                            step["execution_unknown"] = True
+                    day["itinerary"].extend(prefix)
+                    adjustments.add_usage(
+                        usage, {"itinerary": prefix}, request.participants
+                    )
+                    order = [
+                        place
+                        for place in order
+                        if place["candidate_id"] not in done_ids
+                    ]
+                    day["unknowns"].append(
+                        _issue(
+                            "historical_execution_unknown",
+                            "保留原铁路确认时刻与历史计划；实际交通、准点与支出未知",
+                            date=date,
+                        )
+                    )
+                origin = planning.progress_origin.model_dump(mode="json")
+                cursor = max(window.start_at, planning.progress_at)
+                if passed_ids:
+                    ready = max(
+                        old_rails[identifier].arrival_at
+                        + timedelta(
+                            minutes=old_rails[identifier].arrival_buffer_minutes
+                        )
+                        for identifier in passed_ids
+                    )
+                    if ready > cursor:
+                        day["itinerary"].append(
+                            {
+                                "kind": "wait",
+                                "date": date,
+                                "start_at": cursor.isoformat(),
+                                "end_at": ready.isoformat(),
+                                "reason": "保留尚未结束的出站接驳缓冲",
+                            }
+                        )
+                        cursor = ready
 
-            async def city_segment(items, endpoint, end):
-                nonlocal cursor, origin, incomplete
+            async def city_segment(items, endpoint, end, before_rail_id=None):
+                nonlocal cursor, origin, incomplete, progress_consumed
                 if not origin or cursor is None:
                     incomplete = True
                     day["unknowns"].append(
@@ -361,8 +556,12 @@ async def schedule(
                     ],
                     overnight_stays=[],
                     rail_segments=[],
-                    progress_at=None,
-                    progress_origin=None,
+                    progress_at=planning.progress_at.isoformat()
+                    if progress_today and not progress_consumed
+                    else None,
+                    progress_origin=planning.progress_origin.model_dump(mode="json")
+                    if progress_today and not progress_consumed
+                    else None,
                     origin_city=origin.get("city"),
                     end_at=end.isoformat(),
                     return_to_origin=False,
@@ -390,10 +589,14 @@ async def schedule(
                         daily,
                         provider,
                         max_combinations=1,
+                        parent_plan=adjustments.rail_city_parent(
+                            parent_plan, adjustment["parents"].get(date), before_rail_id
+                        ),
                         end_place=endpoint,
                         supplemental_candidates=supplements,
                     )
                 )[0]
+                progress_consumed = True
                 payload = result["payload"]
                 day["itinerary"].extend(
                     {**step, "date": date} for step in payload["itinerary"]
@@ -428,7 +631,11 @@ async def schedule(
                         origin = _anchor(items[-1])
                 return result["status"]
 
-            for rail in (value for value in rails if value.date == window.date):
+            for rail in (
+                value
+                for value in rails
+                if value.date == window.date and value.id not in passed_ids
+            ):
                 departure, arrival = (
                     stations[rail.departure_station_id],
                     stations[rail.arrival_station_id],
@@ -458,6 +665,7 @@ async def schedule(
                         departure,
                         rail.departure_at
                         - timedelta(minutes=rail.boarding_buffer_minutes),
+                        before_rail_id=rail.id,
                     )
                     if connected == "conflict":
                         day["conflicts"].append(
@@ -596,7 +804,7 @@ async def schedule(
                         day["unknowns"].append(
                             _issue(
                                 "lodging_details_unverified",
-                                "房态、当晚房价、入住/退房、行李寄存分别未知，未声称预订完成",
+                                "房态、平台实时可订价格、入住/退房办理时长、行李寄存分别未知，未声称预订完成",
                                 date=date,
                                 candidate_id=hotel["candidate_id"],
                             )
@@ -613,9 +821,30 @@ async def schedule(
                                 price_status="unknown",
                             )
                         )
+            if hotel and not pending:
+                check_stay(day, window, night_rules.get(window.date.isoformat()))
             days.append(day)
             unknowns.extend(day["unknowns"])
             current_conflicts.extend(day["conflicts"])
+        for field in (
+            "walking_distance_meters",
+            "known_cost_cny",
+            "estimated_cost_cny",
+            "unknown_cost_items",
+        ):
+            usage[field] = 0
+        usage["walking_known"] = True
+        for day in days:
+            for step in day["itinerary"]:
+                if step.get("historical") and step["kind"] in {"route", "rail"}:
+                    step["execution_unknown"] = True
+            rule = night_rules.get(day["date"])
+            adjustments.add_usage(
+                usage,
+                day,
+                request.participants,
+                rule.nightly_cost_cny if rule else None,
+            )
         if pending:
             incomplete = True
             unknowns.append(
@@ -659,7 +888,8 @@ async def schedule(
                     "diff": [
                         _issue(
                             "rail_recomputed",
-                            "按用户确认的铁路时刻重新核对相关日与两端接驳",
+                            "保留未受影响的日期与原历史，按确认铁路时刻核对相关日和下游接驳",
+                            reused_dates=list(adjustment["reused"]),
                         )
                     ]
                     if parent_plan

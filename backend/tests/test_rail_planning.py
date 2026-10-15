@@ -235,3 +235,33 @@ def test_rail_buffer_cannot_be_bypassed_by_deleting_wait_steps_from_a_saved_plan
     payload["itinerary"] = payload["days"][0]["itinerary"]
     with pytest.raises(OperationConflict):
         PlanningStore._validate_daily_adoption(payload, value)
+
+
+def test_single_day_cross_city_without_rail_inputs_is_an_explicit_pending_rail_draft():
+    value = round_trip()
+    value["request"]["planning"].pop("rail_segments")
+    provider = Routes()
+    result = run(value, provider)
+    assert result["status"] == "partial" and provider.calls == []
+    assert "rail_timetable_unknown" in {
+        issue["code"] for issue in result["payload"]["unknowns"]
+    }
+
+
+def test_multiday_missing_rail_does_not_hide_missing_hotel_nights():
+    value = multiday()
+    value["request"]["planning"]["overnight_stays"] = []
+    value["selected"][1]["poi"].update(city="上海市", location=[121.31, 31.21])
+    result = run(value)
+    assert result["status"] == "partial"
+    assert [
+        day["date"]
+        for day in result["payload"]["days"]
+        if any(issue["code"] == "lodging_gap" for issue in day["unknowns"])
+    ] == ["2026-10-15", "2026-10-16"]
+    gap = next(
+        issue
+        for issue in result["payload"]["days"][1]["unknowns"]
+        if issue["code"] == "lodging_gap"
+    )
+    assert gap["anchor"]["city"] == "上海市"

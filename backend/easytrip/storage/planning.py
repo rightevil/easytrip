@@ -394,7 +394,9 @@ class PlanningStore:
         if len(cities) > 1 and not (
             request.planning.day_windows or request.planning.rail_segments
         ):
-            gap("cross_city", "P4 只校验单城单日；跨城行程需要后续阶段")
+            gap(
+                "cross_city", "跨城衔接尚缺明确铁路信息，请选择具体车站并确认班次与时刻"
+            )
         selected_ids = {item["candidate_id"] for item in selected}
         for constraint in request.planning.activity_constraints:
             if constraint.candidate_id not in selected_ids and (
@@ -778,6 +780,8 @@ class PlanningStore:
 
     @staticmethod
     def _validate_daily_adoption(payload, current):
+        from zoneinfo import ZoneInfo
+
         from ..integrations.amap import _location
         from .database import OperationConflict
 
@@ -857,7 +861,20 @@ class PlanningStore:
                 raise OperationConflict("末日返程必须回到全行程原始起点")
             position = day["origin"]["location"]
             cursor = window.start_at
+            resumed = False
             for step in day["itinerary"]:
+                if (
+                    not step.get("historical")
+                    and not resumed
+                    and request.planning.progress_at
+                    and request.planning.progress_at.astimezone(
+                        ZoneInfo(request.planning.timezone)
+                    ).date()
+                    == window.date
+                ):
+                    resumed = True
+                    position = request.planning.progress_origin.location
+                    cursor = max(cursor, request.planning.progress_at)
                 if (
                     step.get("date") != day["date"]
                     or not step.get("start_at")
@@ -1000,7 +1017,19 @@ class PlanningStore:
             )
             ready_at = cursor
             outgoing = None
+            resumed = False
             for step in day["itinerary"]:
+                if (
+                    not step.get("historical")
+                    and not resumed
+                    and request.planning.progress_at
+                    and request.planning.progress_at.astimezone(zone).date()
+                    == window.date
+                ):
+                    resumed = True
+                    position = request.planning.progress_origin.location
+                    cursor = max(cursor, request.planning.progress_at)
+                    ready_at = max(ready_at, cursor)
                 if (
                     step.get("date") != day["date"]
                     or not step.get("start_at")
@@ -1067,6 +1096,8 @@ class PlanningStore:
                         if arriving
                         else window.start_at
                     )
+                    if not step.get("historical") and resumed:
+                        reached_at = max(reached_at, request.planning.progress_at)
                     if reached_at > begin - timedelta(
                         minutes=rail.boarding_buffer_minutes
                     ):
