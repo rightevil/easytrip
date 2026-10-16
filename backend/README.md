@@ -1,6 +1,6 @@
 # EasyTrip 后端
 
-提供 SQLite 行程持久化、[业务 API](easytrip/api/README.md)、P2 受控攻略发现、P3 高德地点核对与地图工作区，以及 P0 真实服务验证。React 工作区需先在 `frontend/` 构建；P2 真实语义质量尚未通过验收，自动路线与时间安排留待 P4。
+提供SQLite行程持久化、[业务API](easytrip/api/README.md)、受控攻略发现、高德地点核对与地图、单日/多日规划及铁路接驳。React工作区需先在 `frontend/` 构建；固定文本语义样本已按用户接受的AI基准达标，范围和限制见 [P6验收报告](../docs/p6-acceptance.md)。P0真实服务验证入口继续保留。
 
 ## Windows 使用
 
@@ -94,4 +94,4 @@ uv --directory backend run ruff check .
 
 自动回归使用脱敏夹具/模拟传输和本机 HTTPServer，不再次访问真实账号。报告只声明已验证能力；少量样本不提供统计准确率或固定人民币成本。
 
-P2 工程和采用现有 20 篇/100 条 AI 初评的评测交付已收尾，结果与语义质量未通过项见 [实施与验收记录](../docs/p2-acceptance.md)。[评审说明](../docs/p2-review.md) 记录当前 AI 初评依据、显式 AI 评分和日后可选的人工评测方式；离线评分默认要求真实人工标签，`--reviewer-kind assistant` 才接受单独的 AI 标签，两种结果保留身份，不把 AI 判断改写为人工结论。真实样本、AI 初评和保留的 5 条用户反馈仅存于被忽略的 `reports/p2/`。真实评测由用户指定后单独执行，不在自动回归或恢复旧任务时重复调用。
+固定20篇/100评论的v11复测已达到主正确68/75、可判覆盖75/91，详细证据和次级错误见 [P6报告](../docs/p6-acceptance.md)，历史过程见 [P2记录](../docs/p2-acceptance.md)。[评审说明](../docs/p2-review.md)记录显式AI评分和日后可选的人工评测方式；离线评分默认要求真实人工标签，`--reviewer-kind assistant`才接受单独AI标签，不把AI判断改写为人工结论。原始样本和保留的5条用户反馈仅存于被忽略的 `reports/p2/`，本轮隔离材料位于 `reports/p6/`。真实评测不在自动回归或恢复旧任务时重复调用。

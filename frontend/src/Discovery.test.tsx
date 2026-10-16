@@ -259,7 +259,7 @@ describe('source-grounded discovery', () => {
     expect(screen.getByText(/模型调用结果未知，可能已执行，费用尚未确认/)).toBeTruthy();
     expect(screen.getByText(/本轮不能恢复，请确认新增预算后继续一轮/)).toBeTruthy();
     expect(screen.getByText(/未结清预留 token 32,768/)).toBeTruthy();
-    expect(screen.getByText('模型语义质量未验证，候选与评价请结合原文核对。')).toBeTruthy();
+    expect(screen.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '恢复发现任务' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '继续一轮（新增预算）' }));
     expect(api.startDiscovery).not.toHaveBeenCalled();
@@ -291,7 +291,7 @@ describe('source-grounded discovery', () => {
     expect(reasons).toContain('本轮选取的部分评论尚未完成分析。');
     expect(reasons).toContain('有来源的探索方向不足两个，暂无法充分比较。');
     expect(reasons.match(/本轮新增取得的笔记未达到目标数量/g)).toHaveLength(1);
-    expect(coverage.getByText('模型语义质量未验证，候选与评价请结合原文核对。')).toBeTruthy();
+    expect(coverage.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '恢复发现任务' })).toBeNull();
   });
 
@@ -309,7 +309,7 @@ describe('source-grounded discovery', () => {
     expect(coverage.getByText(/部分活动引用未通过校验，已保留有效评论；相关活动未纳入候选。/)).toBeTruthy();
     if (rejected === undefined) expect(coverage.queryByText('引用校验未通过活动')).toBeNull();
     else expect(coverage.getByText('引用校验未通过活动').closest('div')?.querySelector('strong')?.textContent).toBe(String(rejected));
-    expect(coverage.getByText('模型语义质量未验证，候选与评价请结合原文核对。')).toBeTruthy();
+    expect(coverage.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
   });
 
   it('shows first analysis of reused sources separately from zero new collection and actual charged usage', () => {

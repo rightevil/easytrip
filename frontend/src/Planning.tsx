@@ -147,7 +147,7 @@ export function Planning({ session, archived }: { session: TripSession; archived
   const replacementOptions = replacementPlaces?.candidates.filter(candidate => !workspace.value.selected_ids.includes(candidate.candidate_id) && validCoordinate(candidate.poi.location)) ?? [];
   return <section className="planning-workspace" aria-label={planning.day_windows?.length ? '多日规划工作区' : '单日规划工作区'}>
     <div className="section-subheading"><h3>{planning.day_windows?.length ? '多日规划条件' : '单日规划条件'}</h3><button disabled={reading || tasks.busy} onClick={() => { void reread(); }}>重新读取规划输入</button></div>
-    <p className="discovery-note">时长、预约和费用手填值记为用户确认；空值保持未知。P2 推荐语义仍未通过验收，地点确认不代表营业或费用已核实。</p>
+    <p className="discovery-note">时长、预约和费用手填值记为用户确认；空值保持未知。候选与评价仍可能误读，请结合原文核对；地点确认不代表营业或费用已核实。</p>
     {reading && <p role="status">正在读取已保存的规划输入…</p>}
     {error && <p role="alert" className="inline-error">{error}</p>}
     {request.status !== 'saved' && <p role="status">规划条件{request.status === 'error' || request.status === 'conflict' ? '尚未保存，请先处理保存提示' : '正在保存'}；已保存快照不会覆盖当前编辑。</p>}

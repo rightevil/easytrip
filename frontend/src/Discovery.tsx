@@ -144,7 +144,7 @@ export function Discovery({ session, requestVersion, category, archived }: { ses
   const canChangePlaces = !archived && !busy && !places.busy && !historical;
 
   return <div className="discovery">
-    <div className="discovery-heading"><div><h3>有来源的候选地点</h3><p>先发现和比较，再核对高德地点。泛称保留为线索，P2 语义质量仍未验证。</p></div><button className="primary" disabled={archived || busy || sending || places.busy || runs.some(active) || Boolean(operation && operation.kind !== 'discover')} onClick={() => { void session.startDiscovery(); }}>{busy ? '正在提交…' : operation?.kind === 'discover' ? '重试发现任务' : '发现攻略'}</button></div>
+    <div className="discovery-heading"><div><h3>有来源的候选地点</h3><p>先发现和比较，再核对高德地点。泛称保留为线索，候选与评价仍可能误读，请结合原文核对。</p></div><button className="primary" disabled={archived || busy || sending || places.busy || runs.some(active) || Boolean(operation && operation.kind !== 'discover')} onClick={() => { void session.startDiscovery(); }}>{busy ? '正在提交…' : operation?.kind === 'discover' ? '重试发现任务' : '发现攻略'}</button></div>
     <BudgetEditor budget={discoveryBudget} disabled={busy || archived} onChange={budget => session.setDiscoveryBudget(budget)} />
     {error && <div className="message-error" role="alert"><p>{error}</p>{operation?.kind === 'discover' && <button className="text-button" disabled={busy} onClick={() => session.forgetRunOperation()}>放弃这次重试</button>}</div>}
     {discoveries.length > 0 && <label className="discovery-run-selector">查看发现轮次<select value={selected?.id ?? ''} onChange={event => setSelectedId(event.target.value)}>{discoveries.map((run, index) => <option key={run.id} value={run.id}>第 {discoveries.length - index} 轮 · 条件版本 {run.request_version} · {statusLabels[run.status]}</option>)}</select></label>}
@@ -205,7 +205,7 @@ function Coverage({ run }: { run: Run }) {
     {cumulative && <p>本行程已记录用量：外部调用 {count(cumulative.external_calls)} · token {count(cumulative.model_tokens)} · 图片提交 {count(cumulative.images)} 次 · {cumulative.unknown_cost_calls} 次模型用量不完整 · 费用{cumulative.cost_cny === null ? '未知' : `${cumulative.cost_cny} 元`}。最新统计见“调用用量”，历史未计量操作不补算。</p>}
     {run.usage.interrupted_stage_time_unknown && <p>服务中断阶段耗时未知；已确认用量仍保留。</p>}
     {partialReasons.length > 0 && <p>未完成项：{partialReasons.map(reason => pauseReasons[reason] ?? reason).join('；')}</p>}
-    {result?.model?.semantic_quality === 'not_validated' && <p>模型语义质量未验证，候选与评价请结合原文核对。</p>}
+    {result?.model?.semantic_quality === 'not_validated' && <p>本轮候选未经逐条核实，请结合原文核对。</p>}
   </section>;
 }
 function UnderstandingView({ understanding }: { understanding: Understanding }) {

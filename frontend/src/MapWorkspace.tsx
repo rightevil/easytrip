@@ -61,7 +61,7 @@ export function MapWorkspace({ session, archived }: { session: TripSession; arch
   };
   return <section className="map-workspace" aria-label="正式候选地图">
     <ManualPlaces session={session} archived={archived} />
-    <p className="discovery-note">只绘制已唯一匹配或人工确认的地点。P2 语义质量仍未验证；地点核对不代表推荐或排程已经可靠。</p>
+    <p className="discovery-note">只绘制已唯一匹配或人工确认的地点。候选与评价仍可能误读，请结合原文核对；地点确认不代表营业或费用已核实。</p>
     <div className="map-toolbar"><label>城市图层<select disabled={busy} value={workspace.map_city ?? ''} onChange={event => session.workspace.update({ ...session.workspace.getSnapshot().value, map_city: event.target.value || null })}><option value="">全部城市</option>{cities.map(value => <option key={value} value={value}>{value}</option>)}</select></label><span>{visible.length} 个地点 · {workspace.selected_ids.length} 项加入行程</span><button disabled={archived || busy || !snapshot} onClick={() => setRefreshConfirm(value => !value)}>刷新此筛选的 Top 8</button></div>
     <p className="discovery-note">Top 8 刷新使用当前条件最新发现轮次与用户指定的候选，并应用当前类别和城市筛选。</p>
     {refreshConfirm && <div className="map-refresh-confirm"><p>将地图候选整组替换为当前条件最新发现轮次与用户指定候选中，此类别、城市下已确认的前 8 个地点。出发点保留，行程选择不变。</p><button disabled={busy} onClick={() => setRefreshConfirm(false)}>取消刷新</button><button disabled={archived || busy} onClick={() => { void session.mapAction('refresh').then(saved => { if (saved) setRefreshConfirm(false); }); }}>确认刷新 Top 8</button></div>}
