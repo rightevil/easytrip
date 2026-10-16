@@ -54,6 +54,8 @@ npm --prefix frontend test
 
 全项目使用同一版本号，初始为 `0.1.0`。已配置根目录 `.cz.toml`，**无需再运行 `cz init`**：
 
+当前仍是未发布的验收候选，T05 语义质量未过，T07 仅 AI 样本审阅。只有最终发布门槛或经用户明确接受的发布范围通过后才执行 `cz bump`；普通切片提交不 bump。
+
 ```powershell
 uv tool install commitizen
 cz commit
