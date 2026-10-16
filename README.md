@@ -1,6 +1,6 @@
 # EasyTrip
 
-P5 多日住宿、铁路与跨城已完成开发和有限验收：每日窗口与逐晚酒店、有限住宿补查、用户确认铁路及两端接驳、跨午夜和跨日进度调整、完成/锁定及历史版本保护。[P6工程交付与有限真实验收](docs/p6-acceptance.md)已完成，完整发布仍受语义质量失败和POI认证范围限制；安装、打包和恢复见 [Windows交付说明](docs/delivery.md)。真实服务、自动化与质量限制分别记录在 [P5 实施与验收](docs/p5-acceptance.md)；P4 单城单日能力与 [既有验收](docs/p4-acceptance.md) 继续保留。
+P5 多日住宿、铁路与跨城已完成开发和有限验收：每日窗口与逐晚酒店、有限住宿补查、用户确认铁路及两端接驳、跨午夜和跨日进度调整、完成/锁定及历史版本保护。[P6工程交付与有限真实验收](docs/p6-acceptance.md)已完成，完整发布正在进行固定样本语义整改与复测；地点固定回归已按用户接受的AI基准通过。安装、打包和恢复见 [Windows交付说明](docs/delivery.md)。真实服务、自动化与质量限制分别记录在 [P5 实施与验收](docs/p5-acceptance.md)；P4 单城单日能力与 [既有验收](docs/p4-acceptance.md) 继续保留。
 
 多日在“时间安排”设置每日窗口、活动日期和每晚具体酒店，可填写用户已确认的入住/退房时间与该晚总费用；空值保持未知。铁路需先核对具体火车站，再填入并明确确认班次与完整日期时刻。缺酒店或车次保留草案；生成后明确采用，修改时重新校验并保留旧版，不提供订房、售票或库存承诺。
 
@@ -54,15 +54,18 @@ npm --prefix frontend test
 
 全项目使用同一版本号，初始为 `0.1.0`。已配置根目录 `.cz.toml`，**无需再运行 `cz init`**：
 
-当前仍是未发布的验收候选，T05 语义质量未过，T07 仅 AI 样本审阅。只有最终发布门槛或经用户明确接受的发布范围通过后才执行 `cz bump`；普通切片提交不 bump。
+当前仍是未发布的验收候选，T05等待完整语义复测；T07采用用户接受的AI基准，不声明人工认证。用户已选择继续完整质量整改，普通切片提交不 bump。
 
 ```powershell
 uv tool install commitizen
 cz commit
-cz bump
+# 仅在发布门槛通过后准备版本文件与 Changelog：
+cz bump --version-files-only --check-consistency --yes
+uv --directory backend lock
+./scripts/dev.ps1 test
 ```
 
-`cz bump` 会更新版本配置、`backend/pyproject.toml` 和 `CHANGELOG.md`，并创建 Git Tag。采用 `version_provider = "commitizen"` 时，`backend/uv.lock` 不会自动更新，发布前请运行 `uv --directory backend lock` 并提交锁文件。不要在仅有文档或重构提交时人为提高版本。
+根目录配置会更新版本、`backend/pyproject.toml` 和 `CHANGELOG.md`，`--version-files-only`避免提前创建提交和Tag。`backend/uv.lock`需单独同步；检查版本、锁文件、Changelog和测试后一起提交，再为该最终提交创建对应版本Tag并生成源码包。不要让Tag停在尚未更新锁文件的提交，也不要在普通文档或重构切片提高版本。
 
 ## 说明
 
