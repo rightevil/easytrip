@@ -744,6 +744,85 @@ def test_unclear_pronoun_is_preserved_but_cannot_be_counted_as_linked_experience
     assert build_candidates([result], sources())[0]["stats"]["positive_count"] == 0
 
 
+@pytest.mark.parametrize("link_status", ["unlinked", "uncertain"])
+def test_distinct_explicit_objects_with_same_quote_are_not_deduplicated(link_status):
+    sample, data = note(), extraction()
+    text = "西湖和河坊街都很挤。"
+    sample["comments"][0]["text"] = text
+    data["activities"] = []
+    data["evidence"] = [
+        {
+            **data["evidence"][0],
+            "mention_id": None,
+            "object_text": object_text,
+            "dimension": "拥挤程度",
+            "nature": "unknown",
+            "stance": "negative",
+            "quote": text,
+            "link_status": link_status,
+        }
+        for object_text in ("西湖", "河坊街", "西湖")
+    ]
+
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    rows = result["data"]["evidence"]
+    assert [row["object_text"] for row in rows] == ["西湖", "河坊街"]
+    assert len({row["id"] for row in rows}) == 2
+    assert all(
+        row["quote"] == text
+        and row["link_status"] == link_status
+        and row["mention_id"] is None
+        for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    "object_text,link_status,expected",
+    [
+        ("河坊街", "linked", "uncertain"),
+        ("河坊街", "uncertain", "uncertain"),
+        ("西湖", "linked", "linked"),
+    ],
+)
+def test_explicit_other_object_cannot_vote_for_a_quoted_place(
+    object_text, link_status, expected
+):
+    sample, data = note(), extraction()
+    text = "我去了西湖和河坊街，两处都很挤。"
+    sample["comments"][0]["text"] = text
+    data["activities"] = []
+    data["mentions"].append(
+        {**data["mentions"][0], "id": "hefang", "name": "河坊街", "quote": line_ref()}
+    )
+    data["evidence"][0].update(
+        object_text=object_text,
+        dimension="拥挤程度",
+        nature="experience",
+        stance="negative",
+        quote=text,
+        link_status=link_status,
+    )
+
+    result, calls = run([data], sample=sample)
+    assert result["status"] == "passed" and len(calls) == 1
+    item = result["data"]["evidence"][0]
+    mention = next(row for row in result["data"]["mentions"] if row["name"] == "西湖")
+    assert item["mention_id"] == mention["id"]
+    assert item["link_status"] == expected
+    assert (
+        item["object_text"],
+        item["dimension"],
+        item["nature"],
+        item["stance"],
+        item["quote"],
+    ) == (object_text, "拥挤程度", "experience", "negative", text)
+    candidates = build_candidates([result], sources())
+    assert sum(row["stats"]["negative_count"] for row in candidates) == (
+        1 if expected == "linked" else 0
+    )
+
+
 @pytest.mark.parametrize("object_text", [None, "", " \t\n"])
 def test_linked_empty_object_uses_single_repair_without_guessing(object_text):
     bad, good = extraction(), extraction()

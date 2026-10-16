@@ -378,6 +378,12 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
                 item.mention_id, item.link_status = None, "unlinked"
             if item.mention_id is not None:
                 mention = mentions[item.mention_id]
+                if (
+                    item.link_status == "linked"
+                    and named_objects
+                    and mention.name not in named_objects
+                ):
+                    item.link_status = "uncertain"
                 if mention.name not in item.quote:
                     parent_id = sources[item.source_id].get("reply_to_source_id")
                     parent_text = sources.get(parent_id, {}).get("text", "")
@@ -400,6 +406,7 @@ def validate_note_extraction(content, sources, comment_ids, submitted_images):
         key = (
             item.source_id,
             item.mention_id,
+            item.object_text,
             item.dimension,
             item.stance,
             item.nature,
