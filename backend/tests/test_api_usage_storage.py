@@ -212,6 +212,22 @@ def test_unknown_model_usage_and_legacy_attribution_stay_explicit(database):
     assert report["providers"]["model"]["unknown_cost_calls"] == 1
 
 
+@pytest.mark.parametrize(
+    "task_type", ["evidence_text", "evidence_multimodal", "output_repair"]
+)
+def test_actual_model_task_types_are_retained_in_safe_usage_report(database, task_type):
+    owner = trip(database)
+    current = run(database, owner)
+    database.begin_action(
+        current["id"],
+        current["generation"],
+        "model:actual",
+        "model",
+        {"max_tokens": 32768, "task_type": task_type},
+    )
+    assert database.usage_report(owner["id"])["actions"][0]["operation"] == task_type
+
+
 def test_first_candidate_and_plan_amap_classification_are_not_guessed(database):
     owner = trip(database)
     current = run(database, owner)

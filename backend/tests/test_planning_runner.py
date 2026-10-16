@@ -7,6 +7,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from test_planning import ready
+from test_routes import district_payload, transit_payload
 
 from easytrip.agent.planning import PlanningRunner
 from easytrip.config import Settings
@@ -28,7 +29,7 @@ def database(tmp_path):
     return database
 
 
-def enqueue(database, budget=None):
+def enqueue(database, budget=None, *, transport="walking"):
     trip, identifier = ready(database)
     request = TripRequest.model_validate(trip["request"])
     request.start_at = datetime.combine(
@@ -37,7 +38,7 @@ def enqueue(database, budget=None):
         tzinfo=timezone.utc,
     ) + timedelta(hours=1)
     request.duration_minutes = 180
-    request.transport = "walking"
+    request.transport = transport
     request.transport_source = "user"
     request.planning.origin_city = "杭州市"
     request.planning.activity_constraints = [
@@ -84,21 +85,42 @@ def response(request):
     )
 
 
-def test_runs_real_normalizer_with_mock_transport_saves_and_adopts(database):
+@pytest.mark.parametrize("transport", ["walking", "transit"])
+def test_runs_real_normalizer_with_mock_transport_saves_and_adopts(database, transport):
     async def exercise():
-        trip, body, pending = enqueue(database)
+        trip, body, pending = enqueue(database, transport=transport)
         assert database.enqueue_run(trip["id"], body)["id"] == pending["id"]
         run = database.claim_run()
-        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+
+        def handler(request):
+            if request.url.path == "/v3/config/district":
+                return httpx.Response(200, json=district_payload())
+            return (
+                httpx.Response(200, json=transit_payload())
+                if transport == "transit"
+                else response(request)
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             await PlanningRunner(
                 database, Settings(amap_web_key="test-key"), client=client
             ).execute(run)
         saved = database.get_run(run["id"])
         assert saved["status"] == "completed"
-        assert saved["usage"]["amap_calls"] == saved["usage"]["route_calls"] == 1
+        assert saved["usage"]["amap_calls"] == (2 if transport == "transit" else 1)
+        assert saved["usage"]["route_calls"] == 1
         assert saved["usage"]["model_tokens"] == 0
         actions = database.list_actions(run["id"])
-        assert len(actions) == 1 and actions[0]["status"] == "completed"
+        assert len(actions) == saved["usage"]["amap_calls"]
+        for action in actions:
+            assert action["status"] == "completed"
+            assert action["usage"]["elapsed_seconds"] >= 0
+            assert (
+                action["usage"]["api_version"] == action["result"]["path"].split("/")[0]
+            )
+        assert {action["usage"]["api_version"] for action in actions} == (
+            {"v3", "v5"} if transport == "transit" else {"v5"}
+        )
         plans = database.list_plans(trip["id"])["items"]
         assert plans and plans[0]["payload"]["itinerary"][0]["kind"] == "route"
         assert plans[0]["status"] == "conditional"
@@ -309,7 +331,10 @@ def test_cancellation_retains_unknown_call_without_retry(database):
         cancelled = database.get_run(run["id"])
         assert cancelled["status"] == "cancelled"
         assert cancelled["usage"]["unknown_result_calls"] == 1
-        assert database.list_actions(run["id"])[0]["status"] == "unknown"
+        action = database.list_actions(run["id"])[0]
+        assert action["status"] == "unknown"
+        assert action["usage"]["elapsed_seconds"] >= 0
+        assert action["usage"]["api_version"] == "v5"
         with pytest.raises(OperationConflict):
             database.resume_run(run["id"], trip["id"], cancelled["generation"])
 

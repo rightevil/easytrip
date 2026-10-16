@@ -572,6 +572,8 @@ class ActionStore:
                             if params.get("task_type")
                             in {
                                 "understanding",
+                                "evidence_text",
+                                "evidence_multimodal",
                                 "text_extraction",
                                 "multimodal_extraction",
                                 "output_repair",

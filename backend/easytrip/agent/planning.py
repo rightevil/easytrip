@@ -45,9 +45,10 @@ class PlanningRunner(DiscoveryRunner):
         generation = run["generation"]
         stage_start = monotonic()
         action_id = None
+        request_started = None
 
         async def before():
-            nonlocal action_id
+            nonlocal action_id, request_started
             if self.before_request is not None:
                 await self.before_request()
             if not await self.db("run_is_current", run["id"], generation):
@@ -63,6 +64,7 @@ class PlanningRunner(DiscoveryRunner):
             )
             if action_id is None:
                 raise AmapBudgetExceeded("规划调用额度已用尽或有未知请求")
+            request_started = monotonic()
 
         async def after(path, payload, error):
             nonlocal action_id
@@ -80,11 +82,13 @@ class PlanningRunner(DiscoveryRunner):
                     status=status,
                     result={"path": path, "response_received": payload is not None},
                     usage={
+                        "elapsed_seconds": monotonic() - request_started,
+                        "api_version": "v3" if path == "v3/config/district" else "v5",
                         "amap_kind": "city"
                         if path == "v3/config/district"
                         else "poi"
                         if path.startswith("v5/place/")
-                        else "route"
+                        else "route",
                     },
                 )
                 action_id = None
