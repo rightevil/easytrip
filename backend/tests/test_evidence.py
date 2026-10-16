@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from jsonschema import Draft202012Validator
 
 from easytrip.config import Settings
 from easytrip.services.evidence import (
@@ -847,6 +848,35 @@ def test_linked_empty_object_uses_single_repair_without_guessing(object_text):
         "object_text"
         not in NoteExtraction.model_json_schema()["$defs"]["Evidence"]["required"]
     )
+
+
+def test_request_requires_explicit_nullable_mention_without_breaking_legacy_data():
+    data = extraction()
+    data["mentions"][0]["quote"] = line_ref()
+    data["activities"] = []
+    data["evidence"][0].update(mention_id=None, link_status="unlinked")
+    persisted_schema = NoteExtraction.model_json_schema()
+    result, calls = run([data])
+    assert result["status"] == "passed" and len(calls) == 1
+    schema = json.loads(
+        json.loads(calls[0].content)["messages"][0]["content"].split(
+            "只输出schema JSON: ", 1
+        )[1]
+    )
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(data)
+    legacy = copy.deepcopy(data)
+    legacy["evidence"][0].pop("mention_id")
+    assert any(
+        error.validator == "required" and list(error.path) == ["evidence", 0]
+        for error in validator.iter_errors(legacy)
+    )
+    legacy_result, legacy_calls = run([legacy])
+    assert legacy_result["status"] == "passed" and len(legacy_calls) == 1
+    assert legacy_result["data"]["evidence"][0]["mention_id"] is None
+    assert NoteExtraction.model_json_schema() == persisted_schema
+    assert {"nature", "stance"} <= set(schema["$defs"]["Evidence"]["required"])
+    assert "mention_id" not in persisted_schema["$defs"]["Evidence"]["required"]
 
 
 def test_blank_linked_object_error_aggregates_and_stops_after_one_repair():

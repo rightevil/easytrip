@@ -78,10 +78,29 @@ def _extraction_request_schema():
         "图片活动仅描述待核实观察。"
     )
     evidence = schema["$defs"]["Evidence"]
-    evidence["required"].extend(["object_text", "link_status"])
+    evidence["required"].extend(["object_text", "mention_id", "link_status"])
     evidence["properties"]["object_text"]["description"] = (
-        "评价对象原名或原文指代；明确整体路线可概括对象并unlinked。"
-        "只有确实不明才为空并uncertain；linked不得为空。"
+        "写原文实际判断的语义对象，可为地点、指代明确的匿名对象、整体行程、比较关系、内容、结伴或出发安排；"
+        "不能把非地点判断硬套父笔记地点。对象可理解与能定位或关联具体POI是两回事；"
+        "对象明确但不能严格关联单个提及时保留对象并unlinked，只有对象本身有实质歧义才为空并uncertain。"
+    )
+    evidence["properties"]["mention_id"]["description"] = (
+        "显式填写本批mentions的ID或null。linked须自身quote包含该提及原名；"
+        "或为已提交父评论的回复，父评论唯一明确该提及、object_text写该原名且回复无其他地点。"
+        "仅父笔记语境不足以形成严格关联；unlinked必须null，不借父笔记或未提交图片补单点关联。"
+    )
+    evidence["properties"]["link_status"]["description"] = (
+        "linked仅表示满足mention_id严格引用条件的单个提及关联；"
+        "unlinked表示语义对象明确但不能可靠归属单个提及，mention_id必须null，"
+        "包括整体、匿名但指代明确、比较、内容、结伴和出发安排；"
+        "uncertain保留对象或关联仍有实质歧义的情况，不将不明对象升级为unlinked。图片证据仍为uncertain。"
+    )
+    evidence["properties"]["nature"]["description"] = (
+        "性质与立场、关联分别判断；内容反应不证明亲历，期待和出发安排不证明已经到访。"
+    )
+    evidence["properties"]["stance"]["description"] = (
+        "立场与性质、关联分别判断；中性求证或请求用question，中性到访记录或出发安排用unknown；"
+        "明确褒贬或质疑按原文保留，不因是否关联地点改变立场。"
     )
     return schema
 
@@ -612,7 +631,7 @@ async def extract_note(
         "nature与stance分别判断：'这个不冷门吧？'可nature=question、stance=negative，表示质疑冷门，不是地点亲历差评；'被美景种草了，住宿有推荐吗'须拆为兴趣wish/positive与住宿question/question，不能把兴趣也变为提问。"
         "reply_to_source_id标明回复的父评论；只有父评论唯一明确一个提及且回复无其它地点时才可依据它关联，object_text写该原名；回复quote仍逐字引用自身text，不能借用父评论文字冒充亲历。"
         "object_text显式写评论实际评价对象：地点、整体行程/计划、比较关系、评论区攻略、账号主页或原文明确的匿名对象。能判断对象不等于能关联具体地点。"
-        "linked表示已明确关联具体提及；明确对象不是单个已提及地点时保留object_text，mention_id=null、link_status=unlinked；对象确实有歧义才object_text=''、mention_id=null、link_status=uncertain。"
+        "linked须自身quote含提及原名或满足唯一已提交父评论的严格回复条件；明确对象不能严格关联单个提及时保留object_text，mention_id=null、link_status=unlinked；对象确实有歧义才object_text=''、mention_id=null、link_status=uncertain。"
         "例如'哪个区域离甲站近'对象保留区域与甲站的距离比较，不把甲站当作被点评地点；'1号线比7号线时间长'保留两线时长比较。"
         "未命名老巷、整体路线或攻略内容明确时不要留空，也不猜具体地名；无上下文的'可以'，或船线与景点均可能的'明天开放吗'仍弃判。"
         "dimension写原文支持的主要维度，确实不明用unknown；中性费用/时间事实可以stance=unknown，不能因此省略已明确的对象和维度。"
