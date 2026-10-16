@@ -1,10 +1,19 @@
-"""Synthetic provider responses only; these checks are not account acceptance."""
+"""Sanitized provider fixtures; these checks are not live account acceptance."""
+
+import json
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from easytrip.services.places import match_pois, normalize_poi, rank_candidates
 
 READ_AT = "2026-10-14T10:00:00+08:00"
+POI_QUALITY = json.loads(
+    (Path(__file__).parent / "fixtures" / "poi_quality_20.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 def raw_poi(identifier="B001", name="西湖", **changes):
@@ -74,6 +83,46 @@ def test_complete_exact_same_city_category_is_unique():
     assert result["status"] == "unique"
     assert result["poi"]["id"] == "B001"
     assert result["options"] == [result["poi"]]
+
+
+@pytest.mark.parametrize(
+    "case", POI_QUALITY["cases"], ids=lambda row: row["candidate"]["name"]
+)
+def test_frozen_twenty_poi_cases_follow_independent_assistant_oracle(case):
+    assert POI_QUALITY["reviewer_kind"] == "assistant"
+    assert POI_QUALITY["snapshot_date"] == "2026-10-14"
+    assert len(POI_QUALITY["cases"]) == 20
+    assert sum(row["expected_unique"] is not None for row in POI_QUALITY["cases"]) == 2
+    assert case["read_at"].startswith("2026-10-14")
+    original = deepcopy(case)
+    fields = {"id", "name", "address", "cityname", "type", "location", "adcode"}
+    assert all(set(row) == fields for row in case["response"]["pois"])
+
+    raw = match_pois(
+        case["candidate"], case["mentions"], case["response"], case["read_at"]
+    )
+    normalized = {
+        "status": "1",
+        "search_complete": case["response"]["search_complete"],
+        "pois": [
+            normalize_poi(row, case["read_at"], "v5")
+            for row in case["response"]["pois"]
+        ],
+    }
+    normalized_before = deepcopy(normalized)
+    assert (
+        match_pois(case["candidate"], case["mentions"], normalized, case["read_at"])
+        == raw
+    )
+    assert raw["status"] in case["allowed_statuses"]
+    expected = case["expected_unique"]
+    if expected is not None:
+        assert raw["status"] == "unique"
+        assert {key: raw["poi"][key] for key in expected} == expected
+    else:
+        assert raw["poi"] is None
+    assert normalized == normalized_before
+    assert case == original
 
 
 @pytest.mark.parametrize(
