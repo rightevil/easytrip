@@ -1,6 +1,6 @@
 # Windows 源码交付与发布判定
 
-当前产品版本 `0.1.0`，固定样本质量已通过，正在完成正式版本封包。T05主正确68/75（90.7%）、可判覆盖75/91（82.4%），T07固定20例符合用户接受的AI安全预期，均不声明人工认证。历史失败及完整证据见 [P6报告](p6-acceptance.md)。
+当前交付版本 `0.2.0`，对应发布Tag `v0.2.0`。T05主正确68/75（90.7%）、可判覆盖75/91（82.4%），T07固定20例符合用户接受的AI安全预期，均不声明人工认证。工程、有限真实链路及质量证据见 [P6报告](p6-acceptance.md)。
 
 ## 环境与安装
 
@@ -43,3 +43,9 @@ uv --directory backend run python ../scripts/package.py ../reports/EasyTrip-sour
 工程与固定文本90%/80%门槛已通过，20地点案例按用户接受的AI基准验收，保留完整发布目标。AI报告仍保留assistant身份、固定分母、16可判弃判、3不足超判和性质/立场弱项；固定样本通过不代表每轮推荐或当前营业、价格已核实。
 
 只有完整门槛通过后，才按根目录 `.cz.toml` 执行 `cz bump --version-files-only --check-consistency --yes`，准备版本、`backend/pyproject.toml` 和Changelog；再执行 `uv --directory backend lock` 并复测。审查并一并提交后，为这个已含最终锁文件的提交创建对应版本Tag，再从该提交打包。不要直接用默认bump提前建Tag，导致Tag与后续锁文件不一致。当前普通切片与候选源码包不等于发布动作已完成。
+
+## 0.2.0 交付清单
+
+本版先完成完整固定样本评分，再同步产品版本、Changelog和 `backend/uv.lock`；依赖包版本未升级。发布Tag指向包含最终锁文件及验收说明的提交，正式源码包从该提交生成。交付文件为本机 `reports/p6/EasyTrip-0.2.0-source.zip`，附同名 `.sha256`；`manifest.json`记录实际revision、0.2.0版本及逐文件SHA256。
+
+交付时核对ZIP CRC、manifest全量文件/大小/SHA、Tag与revision一致，并扫描已配置凭证、排除真实配置和私有数据。详细核验收据位于本机 `reports/p6/release-0.2.0.json`，不进入源码包。旧包安装/无Node启动/备份恢复的实际演练版本与范围见上文，最终0.2.0包核验不冒充重新实装或另一台Windows机器测试。首次使用仍按本页执行锁定安装与前端构建。
