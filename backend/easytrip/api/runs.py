@@ -37,6 +37,14 @@ def make_router():
         run = _call(request, "get_run", run_id, str(trip_id))
         if run["kind"] == "discover":
             run["trip_usage"] = _call(request, "trip_usage", str(trip_id))
+            if (run.get("stop_reason") or "").startswith("model_"):
+                for action in reversed(_call(request, "list_actions", run_id)):
+                    if action["kind"] != "model":
+                        continue
+                    code = (action.get("usage") or {}).get("http_status")
+                    if type(code) is int and 400 <= code <= 599:
+                        run["model_http_status"] = code
+                    break
         return run
 
     @router.post("/runs/{run_id}/cancel")

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from './api';
@@ -31,6 +31,11 @@ const candidate = (tripId: string, overrides: Partial<Candidate> = {}): Candidat
 });
 const page = (...items: Candidate[]): CandidatePage => ({ items, total: items.length, limit: 20, offset: 0 });
 const source = (overrides: Partial<Source> = {}): Source => ({ id: 'source-one', trip_id: 'one', run_id: 'run-one', request_version: 1, platform: 'xiaohongshu', kind: 'note', external_id: 'original-one', parent_source_id: null, title: '湖畔笔记', text: '湖州市湖畔有安静步道，开放时间待确认。', images: [], published_at: null, completeness: 'partial', read_status: 'success', error_code: null, dedupe_confidence: 'high', first_read_at: timestamp, last_read_at: timestamp, ...overrides });
+function coverageRegion() {
+  const summary = screen.getByText('查看采集与分析详情');
+  if (!summary.closest('details')?.open) fireEvent.click(summary);
+  return screen.getByRole('region', { name: '实际采集与分析覆盖' });
+}
 const sessions: TripSession[] = [];
 function session(value: Trip) { const created = new TripSession(value, () => {}); sessions.push(created); return created; }
 beforeEach(() => {
@@ -44,6 +49,20 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessions.splice(0).forEach(value => value.dispose()); vi.restoreAllMocks(); });
 
 describe('source-grounded discovery', () => {
+  it('shows the saved HTTP 429 cause without exposing zero coverage or retrying the provider', async () => {
+    const stopped = run('one', { status: 'paused', stage: 'understanding', stop_reason: 'model_request_failed', model_http_status: 429 });
+    vi.spyOn(api, 'getRun').mockResolvedValue(stopped);
+    const start = vi.spyOn(api, 'startDiscovery');
+    render(<Discovery session={session(trip('one', [stopped]))} requestVersion={1} category="all" archived={false} />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByText('模型服务暂时限制请求（HTTP 429）')).toBeTruthy();
+    expect(screen.getByText(/还没有开始搜索攻略/)).toBeTruthy();
+    expect(start).not.toHaveBeenCalled();
+    const details = screen.getByText('查看采集与分析详情').closest('details')!;
+    expect(details.open).toBe(false);
+    await userEvent.click(screen.getByText('查看采集与分析详情'));
+    expect(screen.getByRole('region', { name: '实际采集与分析覆盖' })).toBeTruthy();
+  });
   it.each([
     [0, 0, '本轮超时，尚无成功分析'],
     [1, 0, '本轮超时，已保留部分分析'],
@@ -210,7 +229,7 @@ describe('source-grounded discovery', () => {
   it('shows actual coverage and unknown charges with an honest service pause', () => {
     const paused = run('one', { status: 'paused', stage: 'fetching', stop_reason: 'source_login_or_access_required', usage: { steps: 9, elapsed_seconds: 22, external_calls: 6, model_tokens: 1200, images: 3, searches: 2, model_calls: 2, notes_obtained: 4, notes_analyzed: 2, notes_failed: 1, comments_obtained: 40, comments_selected: 20, comments_analyzed: 15, comments_judged: 12, judgement_rows: 19, images_obtained: 8, unknown_cost_calls: 1 }, trip_usage: { external_calls: 9, model_tokens: 1800, images: 5, unknown_cost_calls: 2, cost_cny: null } });
     render(<Discovery session={session(trip('one', [paused]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     expect(coverage.getByText('4 / 30')).toBeTruthy();
     expect(coverage.getByText('40 / 15')).toBeTruthy();
     expect(coverage.getByText('12 / 28')).toBeTruthy();
@@ -254,7 +273,7 @@ describe('source-grounded discovery', () => {
   it('uses unique image coverage and requires a new run after uncertain model retries', () => {
     const paused = run('one', { status: 'paused', stage: 'extracting', stop_reason: 'model_retry_requires_new_run', usage: { steps: 10, elapsed_seconds: 40, external_calls: 4, model_tokens: 2000, reserved_tokens: 4000, images: 8, images_obtained: 5, images_analyzed_unique: 2, images_unanalyzed: 3, unknown_cost_calls: 1 } });
     render(<Discovery session={session(trip('one', [paused]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     expect(coverage.getByText('5 / 8')).toBeTruthy();
     expect(coverage.getByText('2 / 3')).toBeTruthy();
     expect(coverage.getByText(/未结清预留 token 4,000/)).toBeTruthy();
@@ -297,7 +316,7 @@ describe('source-grounded discovery', () => {
       },
     });
     render(<Discovery session={session(trip('one', [partial]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     expect(coverage.getByText('0 / 30')).toBeTruthy();
     expect(coverage.getByText('沿用笔记：已分析 / 总数').closest('div')?.querySelector('strong')?.textContent).toBe('未知 / 3');
     expect(coverage.getByText('沿用评论：已分析 / 总数').closest('div')?.querySelector('strong')?.textContent).toBe('未知 / 9');
@@ -323,7 +342,7 @@ describe('source-grounded discovery', () => {
       },
     });
     render(<Discovery session={session(trip('one', [partial]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     expect(coverage.getByText(/部分活动引用未通过校验，已保留有效评论；相关活动未纳入候选。/)).toBeTruthy();
     if (rejected === undefined) expect(coverage.queryByText('引用校验未通过活动')).toBeNull();
     else expect(coverage.getByText('引用校验未通过活动').closest('div')?.querySelector('strong')?.textContent).toBe(String(rejected));
@@ -337,7 +356,7 @@ describe('source-grounded discovery', () => {
       result: { coverage: { notes_reused: 20, notes_reused_analyzed: 1, comments_reused: 301, comments_reused_analyzed: 20, comments_reused_judged: 12, images_reused_obtained: 215, images_reused_analyzed_unique: 3, images_reused_unanalyzed: 212 } },
     });
     render(<Discovery session={session(trip('one', [analyzed]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     const metric = (label: string) => coverage.getByText(label).closest('div')?.querySelector('strong')?.textContent;
     expect(metric('本轮新增笔记 / 目标')).toBe('0 / 30');
     expect(metric('取得 / 已分析评论')).toBe('0 / 0');
@@ -354,7 +373,7 @@ describe('source-grounded discovery', () => {
   it.each([undefined, 0])('does not invent reused image completion when its remaining count is %s', remaining => {
     const historical = run('one', { result: { coverage: { images_reused_obtained: 1, images_reused_analyzed_unique: 1, images_reused_unanalyzed: remaining, comments_reused_judged: 0 } } });
     render(<Discovery session={session(trip('one', [historical]))} requestVersion={1} category="all" archived={false} />);
-    const coverage = within(screen.getByRole('region', { name: '实际采集与分析覆盖' }));
+    const coverage = within(coverageRegion());
     expect(coverage.getByText('沿用图片：已分析 / 总数 / 未分析（去重）').closest('div')?.querySelector('strong')?.textContent).toBe(`1 / 1 / ${remaining === undefined ? '未知' : '0'}`);
     expect(coverage.getByText('沿用评论：已判 / 未判').closest('div')?.querySelector('strong')?.textContent).toBe('0 / 未知');
   });

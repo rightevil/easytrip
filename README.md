@@ -19,6 +19,8 @@ EasyTrip `0.2.0` 完成[P6工程交付与质量验收](docs/p6-acceptance.md)：
 
 ## Windows 桌面版
 
+发现工作区采用紧凑条件摘要、可展开的条件编辑和候选/地图同屏布局；小窗口改为纵向展示，原地图页状态继续兼容。已保存方案优先展示，采集统计与任务用量按需展开。模型 HTTP 错误会显示台账中的状态码；这不会解除供应商限流，也不会自动重发未知费用请求。
+
 运行 `./scripts/build-desktop.ps1` 生成 `dist/EasyTrip.exe`。使用 pywebview + PyInstaller 单文件打包，双击打开独立窗口，使用者不需要安装 Python 或 Node。Windows 需安装 [Microsoft Edge WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)；本机服务只监听随机回环端口，关闭窗口时一并退出。
 
 左侧「设置」可填写小红书 MCP、12306 MCP、高德 Web/JS Key、安全密钥、可选高德 MCP 地址及模型服务地址、Key、模型名。保存后关闭并重新打开应用生效，运行中的任务不会在保存时切换凭证。已保存的地址和密钥不回显；空白输入保留原值，显式「清除」才会移除。
@@ -67,6 +69,10 @@ npm --prefix frontend test
 ```
 
 ## 提交与版本
+
+GitHub Actions 在 `main`、PR 和手动触发时运行 Windows 回归与单文件打包；推送 `v*` Tag 时，仅在同一流水线的测试、构建、版本和产物检查全部通过后发布 GitHub Release。Release 附带版本化 x64 exe 和 `SHA256SUMS.txt`；不上传本机配置或数据库。
+
+发布仍由 Commitizen 管理，先提交功能改动，再运行 `cz bump --version-files-only --check-consistency --yes`；随后执行 `uv --directory backend lock`，把版本、锁文件与 Changelog 一起提交。为该最终提交创建对应 annotated `vX.Y.Z` Tag，推送提交和 Tag 后等待 Actions 完成；不要提前给缺少锁文件变更的提交打 Tag。CI 只构建和发布，不自行更改版本或反复 bump。内部前端 npm 包版本不作为桌面产品发布版本。
 
 当前产品版本为 `0.2.0`，由根目录 `.cz.toml` 与 `backend/pyproject.toml`统一管理，**无需再运行 `cz init`**：
 

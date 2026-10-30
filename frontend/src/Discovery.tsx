@@ -91,6 +91,20 @@ export function Discovery({ session, requestVersion, category, archived }: { ses
   const previousContext = useRef('');
   const detailSequence = useRef(0);
   const autoMatched = useRef(new Set<string>());
+  const [modelFailure, setModelFailure] = useState<{ runId: string; code: number } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setModelFailure(null);
+    if (selected && !active(selected) && (selected.stop_reason ?? '').startsWith('model_')) {
+      void api.getRun(selected.id, session.trip.id).then(value => {
+        if (alive && value.id === selected.id && value.trip_id === session.trip.id && value.model_http_status) {
+          setModelFailure({ runId: selected.id, code: value.model_http_status });
+        }
+      }).catch(() => {});
+    }
+    return () => { alive = false; };
+  }, [session, selected?.id, selected?.updated_at, selected?.stop_reason]);
 
   useEffect(() => { if (selected) void session.readPlaces(selected.id); }, [session, selected?.id, selected?.updated_at]);
 
@@ -167,16 +181,21 @@ export function Discovery({ session, requestVersion, category, archived }: { ses
   const canChangePlaces = !archived && !busy && !places.busy && !historical;
 
   return <div className="discovery">
-    <div className="discovery-heading"><div><h3>有来源的候选地点</h3><p>发现后自动匹配并选定具体地点，可直接加入地图和行程；需要更换时点击“调整地点”。泛称保留为线索。</p></div><button className="primary" disabled={archived || busy || sending || places.busy || runs.some(active) || Boolean(operation && operation.kind !== 'discover')} onClick={() => { void session.startDiscovery(); }}>{busy ? '正在提交…' : operation?.kind === 'discover' ? '重试发现任务' : '发现攻略'}</button></div>
+    <div className="discovery-heading"><div><h3>推荐与备选地点</h3><p>按你的条件寻找地点、比较来源，选好后可加入行程。</p></div><button className="primary" disabled={archived || busy || sending || places.busy || runs.some(active) || Boolean(operation && operation.kind !== 'discover')} onClick={() => { void session.startDiscovery(); }}>{busy ? '正在提交…' : operation?.kind === 'discover' ? '重试发现任务' : '发现攻略'}</button></div>
     <BudgetEditor budget={discoveryBudget} disabled={busy || archived} onChange={budget => session.setDiscoveryBudget(budget)} />
     {error && <div className="message-error" role="alert"><p>{error}</p>{operation?.kind === 'discover' && <button className="text-button" disabled={busy} onClick={() => session.forgetRunOperation()}>放弃这次重试</button>}</div>}
     {discoveries.length > 0 && <label className="discovery-run-selector">查看发现轮次<select value={selected?.id ?? ''} onChange={event => setSelectedId(event.target.value)}>{discoveries.map((run, index) => <option key={run.id} value={run.id}>第 {discoveries.length - index} 轮 · 条件版本 {run.request_version} · {statusLabel(run)}</option>)}</select></label>}
     {selected ? <>
       <div className={`discovery-status ${historical ? 'historical' : ''}`} role="status"><strong>{historical ? '旧条件的发现记录' : statusLabel(selected)}</strong><span>{selected.stage === 'discovering' && selected.params.parent_run_id ? '分析已有资料与补搜攻略' : stageLabels[selected.stage] ?? '任务准备中'} · 条件版本 {selected.request_version}</span></div>
       {historical && <p className="discovery-note">这些结果属于旧条件，仅供查看。采用方向与恢复将不会用于覆盖当前条件。</p>}
-      <Coverage run={selected} />
+      {modelFailure?.runId === selected.id && <section className="model-failure" role="alert">
+        <strong>{modelFailure.code === 429 ? '模型服务暂时限制请求（HTTP 429）' : [401, 403].includes(modelFailure.code) ? '模型服务拒绝访问，请检查凭证或权限' : `模型服务请求失败（HTTP ${modelFailure.code}）`}</strong>
+        <p>{selected.stage === 'understanding' ? '需求理解尚未完成，还没有开始搜索攻略。' : '本轮模型处理未完成，已取得的来源和成功结果仍保留。'}{modelFailure.code === 429 ? '可稍后再试，或检查服务端限流与账号状态。' : '请检查模型服务设置后再继续。'}</p>
+        <p>当前输入已保留。费用仍待服务核定，继续一轮会使用新增预算。</p>
+      </section>}
+      <details className="discovery-diagnostics"><summary>查看采集与分析详情</summary><Coverage run={selected} /></details>
       {understanding && <UnderstandingView understanding={understanding} />}
-      {selected.stop_reason && <p className="discovery-note">{selected.stop_reason === 'time_budget_exhausted' ? pauseReasons.time_budget_exhausted : discoveryBudgetExhausted(selected) ? '本轮预算已耗尽，已有结果保留。继续一轮会创建新任务并使用新增预算。' : pauseReasons[selected.stop_reason] ?? '本轮已停止或暂停，请检查服务状态及已取得内容后继续。'}</p>}
+      {selected.stop_reason && <p className="discovery-note discovery-stop" role={active(selected) ? undefined : 'status'}>{selected.stop_reason === 'time_budget_exhausted' ? pauseReasons.time_budget_exhausted : discoveryBudgetExhausted(selected) ? '本轮预算已耗尽，已有结果保留。继续一轮会创建新任务并使用新增预算。' : pauseReasons[selected.stop_reason] ?? '本轮已停止或暂停，请检查服务状态及已取得内容后继续。'}</p>}
       <div className="discovery-actions">{active(selected) && <button disabled={busy} onClick={() => { void session.controlRun(selected.id, 'cancel'); }}>取消发现任务</button>}{!historical && ['paused', 'recoverable', 'cancelled', 'failed', 'partial'].includes(selected.status) && !['done', 'candidates_ready'].includes(selected.stage) && !discoveryBudgetExhausted(selected) && selected.error_code !== 'invalid_run_data' && !['model_retry_requires_new_run', 'model_result_unknown', 'model_request_failed'].includes(selected.stop_reason ?? '') && !archived && <button disabled={busy || sending} onClick={() => { void session.controlRun(selected.id, 'resume'); }}>恢复发现任务</button>}{!active(selected) && !archived && <button disabled={busy || sending || places.busy || runs.some(active) || Boolean(operation && operation.kind !== 'discover')} onClick={() => setConfirmContinue(true)}>继续一轮（新增预算）</button>}<button disabled={!canChangePlaces || active(selected)} onClick={() => { void session.matchPlaces(selected.id); }}>{places.busy ? '正在自动匹配地点…' : '重新自动匹配地点'}</button></div>
       {places.error && <div className="message-error" role="alert"><p>{places.error}</p><button disabled={places.busy} onClick={() => { void session.readPlaces(selected.id); }}>重新读取地点状态</button></div>}
       {readError && <div className="message-error" role="alert"><span>{readError}</span><button className="text-button" onClick={() => setRefresh(value => value + 1)}>重新读取候选</button></div>}

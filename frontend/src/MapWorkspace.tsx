@@ -60,7 +60,7 @@ export function MapWorkspace({ session, archived }: { session: TripSession; arch
     }
   };
   return <section className="map-workspace" aria-label="正式候选地图">
-    <ManualPlaces session={session} archived={archived} />
+    <details className="manual-place-tools"><summary>自己添加一个地点</summary><ManualPlaces session={session} archived={archived} /></details>
     <p className="discovery-note">地图展示自动匹配或你已调整的真实地点，可随时更换；营业时间和费用仍以实际信息为准。</p>
     <div className="map-toolbar"><label>城市图层<select disabled={busy} value={workspace.map_city ?? ''} onChange={event => session.workspace.update({ ...session.workspace.getSnapshot().value, map_city: event.target.value || null })}><option value="">全部城市</option>{cities.map(value => <option key={value} value={value}>{value}</option>)}</select></label><span>{visible.length} 个地点 · {workspace.selected_ids.length} 项加入行程</span><button disabled={archived || busy || !snapshot} onClick={() => setRefreshConfirm(value => !value)}>刷新此筛选的 Top 8</button></div>
     <p className="discovery-note">Top 8 刷新使用当前条件最新发现轮次与用户指定的候选，并应用当前类别和城市筛选。</p>

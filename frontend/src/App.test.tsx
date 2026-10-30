@@ -12,6 +12,7 @@ const trip = (id: string, name: string): Trip => ({
   workspace: { active_tab: 'overview', category: 'all', map_center: null, map_zoom: 12, selected_ids: [], map_visible_ids: [] },
   created_at: '2026-10-12T00:00:00Z', updated_at: '2026-10-12T00:00:00Z', messages: [], runs: [],
 });
+vi.mock('./AMapCanvas', () => ({ AMapCanvas: () => <div data-testid="candidate-map" /> }));
 let saved: Map<string, Trip>;
 beforeEach(() => {
   localStorage.clear();
@@ -31,18 +32,39 @@ beforeEach(() => {
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-async function openApp() { render(<App />); await screen.findByRole('heading', { name: '第一份行程' }); }
+async function openApp() { render(<App />); await screen.findByRole('heading', { name: '第一份行程' }); await userEvent.click(screen.getByText('编辑行程条件')); }
 
 describe('real workspace behaviors', () => {
+  it('starts with a compact condition summary and places beside the map, retaining edits when collapsed', async () => {
+    render(<App />);
+    await screen.findByRole('heading', { name: '第一份行程' });
+    const editor = screen.getByText('编辑行程条件').closest('details')!;
+    expect(editor.open).toBe(false);
+    expect(screen.getByRole('region', { name: '当前行程条件摘要' })).toBeTruthy();
+    expect(screen.getByRole('complementary', { name: '候选地点地图' })).toBeTruthy();
+    expect(screen.getByTestId('candidate-map')).toBeTruthy();
+    await userEvent.click(screen.getByText('编辑行程条件'));
+    expect(editor.open).toBe(true);
+    fireEvent.change(screen.getByLabelText(/从哪里出发/), { target: { value: '杭州东站' } });
+    await userEvent.click(screen.getByText('编辑行程条件'));
+    expect(editor.open).toBe(false);
+    expect(screen.getByRole('region', { name: '当前行程条件摘要' }).textContent).toContain('杭州东站');
+    await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
+    await screen.findByRole('heading', { name: '第二份行程' });
+    expect(api.update).toHaveBeenCalledWith('one', 1, expect.objectContaining({ request: expect.objectContaining({ origin: '杭州东站' }) }));
+    expect(screen.getByText('编辑行程条件').closest('details')?.open).toBe(false);
+  });
   it('saves conditions before switching and restores each trip independently', async () => {
     await openApp();
     fireEvent.change(screen.getByLabelText(/从哪里出发/), { target: { value: '杭州东站' } });
     await userEvent.click(screen.getByRole('button', { name: /第二份行程/ }));
     await screen.findByRole('heading', { name: '第二份行程' });
+    await userEvent.click(screen.getByText('编辑行程条件'));
     expect((screen.getByLabelText(/从哪里出发/) as HTMLInputElement).value).toBe('');
     expect(api.update).toHaveBeenCalledWith('one', 1, expect.objectContaining({ request: expect.objectContaining({ origin: '杭州东站', destination: null }) }));
     await userEvent.click(screen.getByRole('button', { name: /第一份行程/ }));
     await screen.findByRole('heading', { name: '第一份行程' });
+    await userEvent.click(screen.getByText('编辑行程条件'));
     expect((screen.getByLabelText(/从哪里出发/) as HTMLInputElement).value).toBe('杭州东站');
   });
 

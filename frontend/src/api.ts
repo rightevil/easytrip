@@ -52,6 +52,7 @@ export interface Run {
     not_connected: string[];
   } | DiscoveryResult | PlanningResult | null;
   error_code: string | null;
+  model_http_status?: number;
   stop_reason: string | null;
   created_at: string;
   updated_at: string;

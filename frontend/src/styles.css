@@ -84,7 +84,7 @@ h1, h2, h3, p { margin: 0; }
 .save-pill span { margin-right: 4px; }
 .save-pill.error, .save-pill.conflict { color: #ac6049; background: #faeee7; }
 .save-pill.saving, .save-pill.dirty { color: #998752; background: #f3efdd; }
-.work-grid { display: grid; grid-template-columns: minmax(290px, .85fr) minmax(420px, 1.65fr); gap: 23px; align-items: start; }
+.work-grid { display: block; }
 .panel { background: #fdfdfa; border: 1px solid var(--border); border-radius: 15px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .panel-heading > div { display: flex; align-items: center; gap: 10px; }
@@ -366,3 +366,77 @@ input::placeholder, textarea::placeholder { color: #727e69; }
 .planning-modes, .planning-flags { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .planning-issues { padding: 12px; border-left: 3px solid #ad762d; background: #fff8ea; }
 .planning-history article { padding: 12px 0; border-bottom: 1px solid #dfe5da; }
+
+/* Keep the result workspace wide; detailed inputs open without replacing results. */
+.sidebar { width: 196px; flex-basis: 196px; padding: 24px 12px 18px; }
+.brand { margin: 0 7px 30px; font-size: 20px; }
+.main { padding: 24px; max-width: 2000px; }
+.workspace-header { margin-bottom: 18px; }
+.trip-brief { position: relative; margin-bottom: 20px; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: #edf2e7; }
+.trip-brief > div { padding-right: 145px; }
+.trip-brief h2 { font-size: 21px; overflow-wrap: anywhere; }
+.trip-brief p { margin-top: 6px; font-size: 13px; color: #596c55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.trip-facts { display: flex; flex-wrap: wrap; gap: 12px 26px; margin: 18px 0 0; }
+.trip-facts div { min-width: 100px; max-width: 100%; }
+.trip-facts dt { color: #66745e; font-size: 11px; }
+.trip-facts dd { margin: 3px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.conditions { position: absolute; top: 18px; right: 18px; z-index: 5; padding: 0; border: 0; background: transparent; }
+.conditions > summary { cursor: pointer; padding: 9px 13px; border: 1px solid #c8d5c2; border-radius: 8px; background: #fff; font-size: 13px; }
+.conditions[open] { width: min(440px, calc(100vw - 48px)); background: #fffefb; border: 1px solid #c8d5c2; border-radius: 12px; box-shadow: 0 14px 40px #263d3626; }
+.conditions[open] > summary { border: 0; border-radius: 12px 12px 0 0; background: #edf2e7; }
+.conditions > section { max-height: min(72vh, 700px); overflow-y: auto; padding: 20px; }
+.conditions fieldset { display: block; }
+.conditions .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.discovery-map-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.discovery-results { min-width: 0; }
+.result-map { min-width: 0; position: sticky; top: 20px; padding-left: 20px; border-left: 1px solid var(--border); }
+.result-map > h3 { font-size: 15px; }
+.result-map .amap-container { height: 440px; }
+.result-map .map-surface { min-height: 440px; }
+.result-map .map-point-list { grid-template-columns: 1fr; max-height: 180px; overflow-y: auto; }
+.manual-place-tools { margin: 10px 0 14px; font-size: 12px; }
+.manual-place-tools > summary, .discovery-diagnostics > summary, .task-details > summary { cursor: pointer; color: var(--green); }
+.manual-place-tools .manual-places { margin-top: 14px; }
+.task-details { padding: 16px 20px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
+.task-details > section { margin-top: 16px; }
+.discovery-diagnostics { margin: 12px 0; padding: 10px 0; font-size: 12px; border-bottom: 1px solid var(--border); }
+.discovery-stop { padding: 12px; background: #fff5e8; border: 1px solid #e5ceb0; border-radius: 9px; }
+.model-failure { border: 1px solid #dbbca2; background: #fff6ed; border-radius: 10px; padding: 14px; margin: 14px 0; font-size: 13px; }
+.model-failure p { margin-top: 8px; line-height: 1.7; }
+.workspace-panel { padding: 20px; }
+.workspace-panel > .section-subheading { margin-top: 0; margin-bottom: 18px; }
+.discovery-heading h3 { font-size: 16px; }
+.discovery-heading p { font-size: 12px; }
+.candidate-card { padding: 16px; }
+.candidate-card h4 { font-size: 16px; }
+.candidate-card p { font-size: 12px; }
+.candidate-actions { flex-wrap: wrap; }
+.chat-history:has(.chat-empty) { padding: 12px 0; }
+@media (max-width: 1100px) {
+  .sidebar { width: 180px; flex-basis: 180px; padding: 24px 10px; }
+  .main { padding: 20px; }
+  .discovery-map-layout { gap: 16px; }
+  .result-map { padding-left: 14px; }
+}
+@media (max-width: 960px) {
+  .discovery-map-layout { grid-template-columns: 1fr; }
+  .result-map { position: static; border-left: 0; padding: 20px 0 0; border-top: 1px solid var(--border); }
+  .map-priority .result-map { grid-row: 1; border-top: 0; border-bottom: 1px solid var(--border); padding: 0 0 20px; }
+  .result-map .amap-container { height: 340px; }
+  .result-map .map-surface { min-height: 340px; }
+}
+@media (max-width: 700px) {
+  .sidebar { width: 100%; padding: 16px; }
+  .brand { margin: 0; }
+  .main { padding: 18px 14px; }
+  .trip-brief { padding: 16px; }
+  .trip-brief > div { padding-right: 0; }
+  .trip-brief h2 { font-size: 18px; }
+  .trip-facts { gap: 12px 18px; }
+  .conditions { position: relative; top: auto; right: auto; margin-top: 16px; }
+  .conditions[open] { width: 100%; }
+  .conditions > section { padding: 14px; }
+  .conditions > summary { display: block; }
+  .workspace-panel { padding: 16px; }
+  .tabs { gap: 22px; padding: 0 16px; }
+}
