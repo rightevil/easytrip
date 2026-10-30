@@ -12,7 +12,7 @@ from test_model_recovery import intent
 from easytrip.agent import content
 from easytrip.agent.discovery import DiscoveryRunner
 from easytrip.config import Settings
-from easytrip.domain.models import CreateTrip, TripRequest
+from easytrip.domain.models import CreateTrip, MessageCreate, TripRequest
 from easytrip.domain.tasks import CreateRun
 from easytrip.storage.database import Database
 
@@ -475,7 +475,7 @@ def test_continuation_reuses_analysis_without_new_detail_or_image_fee(
         child = database.claim_run()
         await runner.execute(child)
         final = database.get_run(child["id"])
-        assert len(calls) == previous[0] + 1
+        assert len(calls) == previous[0]
         assert (
             len([item for item in mcp.calls if item[0] == "get_feed_detail"])
             == previous[1]
@@ -486,8 +486,8 @@ def test_continuation_reuses_analysis_without_new_detail_or_image_fee(
         assert final["result"]["coverage"]["comments_reused_analyzed"] == 2
         assert final["result"]["coverage"]["comments_reused_judged"] == 2
         assert database.list_candidates(trip["id"], child["id"])["total"] > 0
-        assert final["usage"]["model_calls"] == 1
-        assert database.trip_usage(trip["id"])["model_tokens"] == 90
+        assert final["usage"]["model_calls"] == 0
+        assert database.trip_usage(trip["id"])["model_tokens"] == 60
 
     asyncio.run(check())
 
@@ -559,9 +559,9 @@ def test_inherited_coverage_shows_sources_before_and_after_analysis(
             == final["usage"]["images_analyzed_unique"]
             == 0
         )
-        assert final["usage"]["model_calls"] == 1 + int(analyze_inherited)
+        assert final["usage"]["model_calls"] == int(analyze_inherited)
         assert final["usage"]["images"] == 2 * int(analyze_inherited)
-        assert len(calls) == 2 + int(analyze_inherited)
+        assert len(calls) == 1 + int(analyze_inherited)
         assert (
             "comments_partly_unanalysed" in final["result"]["partial_reasons"]
         ) is not analyze_inherited
@@ -826,7 +826,7 @@ def test_bad_activity_keeps_valid_comments_and_reports_partial_without_repair(
         inherited = database.get_run_item(child["id"], key)
         assert inherited["reused_from_run"] == run["id"]
         assert inherited["data"]["activity_validation"] == report
-        assert len(calls) == before[0] + 1
+        assert len(calls) == before[0]
         assert sum(name == "get_feed_detail" for name, _ in mcp.calls) == before[1]
         reused = database.get_run(child["id"])
         assert reused["result"]["coverage"]["activities_rejected"] == 1
@@ -1000,11 +1000,9 @@ def test_three_rounds_reuse_nearest_successful_analysis_of_inherited_sources(
         third = database.claim_run()
         await runner.execute(third)
         final = database.get_run(third["id"])
-        assert (
-            len(calls) == before[0] + 1
-        )  # Only the new round's understanding request.
+        assert len(calls) == before[0]
         assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
-        assert final["usage"]["model_calls"] == 1 and final["usage"]["images"] == 0
+        assert final["usage"]["model_calls"] == 0 and final["usage"]["images"] == 0
         assert (
             database.get_run_item(third["id"], "collection:inherited")[0]["run_id"]
             == first["id"]
@@ -1091,7 +1089,7 @@ def test_new_contract_reanalyses_old_parent_then_reuses_nearest_compatible_resul
         revised = database.get_run_item(child["id"], key)
         assert revised["note_hash"] == content.note_hash(note)
         assert all(row["object_text"] == "西湖" for row in revised["data"]["evidence"])
-        assert len(calls) == before[0] + 2
+        assert len(calls) == before[0] + 1
         assert database.get_run(child["id"])["usage"]["images"] == 2
         assert database.get_run_item(parent["id"], key) == old_result
         assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
@@ -1111,7 +1109,7 @@ def test_new_contract_reanalyses_old_parent_then_reuses_nearest_compatible_resul
         reused = database.get_run_item(grandchild["id"], key)
         assert reused["reused_from_run"] == child["id"]
         assert reused["note_hash"] == revised["note_hash"]
-        assert len(calls) == before[0] + 1
+        assert len(calls) == before[0]
         assert database.get_run(grandchild["id"])["usage"]["images"] == 0
         assert len([row for row in mcp.calls if row[0] == "get_feed_detail"]) == 1
 
@@ -1236,7 +1234,7 @@ def test_successful_action_recovery_preserves_its_physical_input_hash(
         )
         if recorded_contract == "model_changed":
             assert all(request["model"] == "model-b" for request in calls[before[0] :])
-        assert len(calls) == before[0] + (1 if recorded_contract == "current" else 2)
+        assert len(calls) == before[0] + (0 if recorded_contract == "current" else 1)
         assert database.get_run(child["id"])["usage"]["images"] == (
             0 if recorded_contract == "current" else 2
         )
@@ -1315,6 +1313,9 @@ def test_new_contract_cache_miss_still_obeys_child_call_budget(tmp_path, monkeyp
         parent = database.claim_run()
         await runner.execute(parent)
         monkeypatch.setattr(content, "EXTRACTION_CONTRACT", "new-prompt")
+        database.add_message(
+            trip["id"], MessageCreate(operation_id=uuid4(), content="也想看看海边")
+        )
         database.enqueue_run(
             trip["id"],
             CreateRun(

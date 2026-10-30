@@ -5,7 +5,7 @@ import json
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .config import DATA_DIR, ROOT_DIR, Settings, validate_url
+from .config import DATA_DIR, ROOT_DIR, Settings, configuration_checks
 from .storage.maintenance import MaintenanceError, inspect_database
 
 
@@ -34,17 +34,6 @@ def readiness(settings=None, *, frontend_dir=None, database_path=None):
         except PackageNotFoundError:
             dependencies[name] = None
 
-    def service(address, configured):
-        if not address and not configured:
-            return "unconfigured"
-        if not address or not configured:
-            return "incomplete"
-        try:
-            validate_url(address)
-        except ValueError:
-            return "invalid"
-        return "configured_not_probed"
-
     built = (frontend / "index.html").is_file() and any(
         (frontend / "assets").glob("*.js")
     )
@@ -56,20 +45,8 @@ def readiness(settings=None, *, frontend_dir=None, database_path=None):
         "database": database,
         "dependencies": dependencies,
         "services": {
-            "xhs_mcp": service(settings.xhs_mcp, bool(settings.xhs_mcp)),
-            "rail_mcp": service(settings.rail_mcp, bool(settings.rail_mcp)),
-            "model": service(
-                settings.model_base_url,
-                bool(settings.model_api_key and settings.model_id),
-            ),
-            "amap_web": "configured_not_probed"
-            if settings.amap_web_key
-            else "unconfigured",
-            "amap_js": "configured_not_probed"
-            if settings.amap_js_key and settings.amap_js_secure_key
-            else "incomplete"
-            if settings.amap_js_key or settings.amap_js_secure_key
-            else "unconfigured",
+            name: check["state"] for name, check in configuration_checks(vars(settings)).items()
+            if name != "amap_mcp"
         },
     }
 

@@ -20,6 +20,32 @@ h1, h2, h3, p { margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 100; background: white; padding: 12px; }
 .skip-link:focus { top: 10px; }
+.settings-link { margin: 12px 10px 0; text-align: left; }
+.settings-link[aria-current="page"] { background: #dfe9df; border-color: #a6c5a9; }
+.settings-page { max-width: 940px; }
+.settings-intro { font-size: 13px; margin-bottom: 16px; }
+.settings-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.settings-show { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 15px 0; }
+.settings-show input { width: auto; }
+.settings-group { padding: 22px; margin-bottom: 18px; }
+.settings-group h2 { font-size: 17px; margin-bottom: 5px; }
+.settings-group > p { font-size: 12px; margin-bottom: 20px; }
+.settings-field { margin-top: 15px; }
+.settings-field > label { display: block; font-size: 13px; margin-bottom: 6px; }
+.settings-field > label .muted { font-size: 11px; }
+.settings-input { display: flex; gap: 10px; }
+.settings-input input { flex: 1; min-width: 0; }
+.settings-input button { flex-shrink: 0; font-size: 12px; }
+.settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; font-size: 12px; margin: 20px 0; }
+.settings-notice { background: #e7efe3; padding: 14px; border-radius: 9px; margin: 16px 0; font-size: 13px; }
+.settings-path { font-size: 12px; overflow-wrap: anywhere; }
+.settings-steps { font-size: 13px; padding-left: 22px; line-height: 1.9; }
+.settings-file { display: grid; gap: 8px; font-size: 13px; }
+.settings-file input { max-width: 100%; }
+.settings-import-preview { margin-top: 20px; font-size: 13px; overflow-wrap: anywhere; }
+.settings-checks { list-style: none; margin: 12px 0 20px; padding: 0; font-size: 13px; }
+.settings-checks li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.settings-checks small { flex-basis: 100%; }
 .shell { display: flex; min-height: 100vh; }
 .sidebar { width: 254px; flex: 0 0 254px; background: #eeefe8; padding: 30px 18px 22px; border-right: 1px solid #e1e5dc; display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0; }
 .brand { display: flex; align-items: center; gap: 11px; margin: 0 10px 46px; color: var(--ink); font-size: 21px; font-weight: 750; letter-spacing: -.6px; }

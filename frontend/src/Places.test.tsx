@@ -29,6 +29,7 @@ beforeEach(() => {
   current = new TripSession(trip(), () => {});
   snapshot = { trip: trip(), run_id: 'run-one', request_version: 1, candidates: [], matches: [], points: [] };
   vi.spyOn(api, 'places').mockImplementation(async () => structuredClone(snapshot));
+  vi.spyOn(api, 'matchPlaces').mockImplementation(async () => structuredClone(snapshot));
   vi.spyOn(api, 'candidates').mockImplementation(async () => ({ items: snapshot.candidates, total: snapshot.candidates.length, limit: 20, offset: 0 }));
   vi.spyOn(api, 'gaps').mockResolvedValue({ items: [] });
   vi.spyOn(api, 'workspace').mockImplementation(async (_id, version, workspace) => { snapshot.trip = { ...snapshot.trip, workspace, workspace_version: version + 1 }; return structuredClone(snapshot.trip); });
@@ -40,6 +41,68 @@ afterEach(() => { cleanup(); current.dispose(); vi.restoreAllMocks(); });
 const card = (name: string) => within(screen.getByRole('heading', { name }).closest('article')!);
 
 describe('P3 map and candidate operations', () => {
+  it('automatically selects a place once and lets the user adjust it afterwards', async () => {
+    snapshot.candidates = [candidate(0)];
+    snapshot.matches = [match(0, { status: 'ambiguous', poi: null, options: [poi(0), poi(1)] })];
+    vi.mocked(api.matchPlaces).mockImplementation(async () => {
+      snapshot.matches = [match(0, { options: [poi(0), poi(1)], reason: '自动选定默认地点，可调整' })];
+      snapshot.trip.workspace_version = 2;
+      return structuredClone(snapshot);
+    });
+    vi.spyOn(api, 'confirmPlace').mockImplementation(async () => {
+      snapshot.matches = [match(0, { poi: poi(1), options: [poi(0), poi(1)], confirmed: true })];
+      return structuredClone(snapshot);
+    });
+    render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
+    await screen.findByText('自动已选地点');
+    expect(api.matchPlaces).toHaveBeenCalledExactlyOnceWith('one', 1, 1, 'run-one', ['candidate-0']);
+    expect(api.confirmPlace).not.toHaveBeenCalled();
+    expect(card('候选0').getByRole('button', { name: '加入行程' })).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await userEvent.click(card('候选0').getByRole('button', { name: '调整地点' }));
+    expect(screen.getByRole('button', { name: /地点0.*核实地址0.*poi-0/ }).getAttribute('aria-pressed')).toBe('true');
+    await userEvent.click(screen.getByRole('button', { name: /地点1.*核实地址1.*poi-1/ }));
+    await userEvent.click(screen.getByRole('button', { name: '保存地点调整' }));
+    await waitFor(() => expect(api.confirmPlace).toHaveBeenCalledWith('one', 'candidate-0', 1, 2, 'poi-1'));
+    await screen.findByText('用户已选地点');
+    expect(api.matchPlaces).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['historical', 'archived', 'running'])('does not auto-match a %s discovery', async state => {
+    snapshot.candidates = [candidate(0)];
+    if (state === 'running') {
+      current.dispose();
+      current = new TripSession({ ...trip(), runs: [{ ...discoveryRun, status: 'running' }] }, () => {});
+    }
+    render(<Discovery session={current} requestVersion={state === 'historical' ? 2 : 1} category="all" archived={state === 'archived'} />);
+    await screen.findByRole('heading', { name: '候选0' });
+    expect(api.matchPlaces).not.toHaveBeenCalled();
+  });
+
+  it('automatically handles later batches when the candidate page contains only the first twenty', async () => {
+    snapshot.candidates = Array.from({ length: 25 }, (_, index) => candidate(index));
+    vi.mocked(api.candidates).mockImplementation(async () => ({ items: snapshot.candidates.slice(0, 20), total: 25, limit: 20, offset: 0 }));
+    vi.mocked(api.matchPlaces).mockImplementation(async (_trip, _version, _workspaceVersion, _run, ids) => {
+      snapshot.matches.push(...ids!.map(id => match(Number(id.split('-')[1]))));
+      return structuredClone(snapshot);
+    });
+    render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
+    await waitFor(() => expect(api.matchPlaces).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.matchPlaces).mock.calls.map(call => call[4]?.length)).toEqual([20, 5]);
+    await waitFor(() => expect(screen.getAllByText('自动已选地点')).toHaveLength(25));
+    expect(api.matchPlaces).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('shows an automatic match failure without repeatedly calling the provider', async () => {
+    snapshot.candidates = Array.from({ length: 25 }, (_, index) => candidate(index));
+    vi.mocked(api.matchPlaces).mockRejectedValue(new Error('地点服务暂不可用'));
+    render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
+    await screen.findByText('地点服务暂不可用');
+    expect(api.matchPlaces).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it('keeps an older selected source run and its unresolved POI options when map actions return the latest empty run', async () => {
     const latest = { ...discoveryRun, id: 'latest-empty', status: 'paused' as const, stage: 'fetching' as const, created_at: '2026-10-14T02:00:00Z' };
     current.dispose(); current = new TripSession({ ...trip(), runs: [latest, discoveryRun] }, () => {});
@@ -57,18 +120,18 @@ describe('P3 map and candidate operations', () => {
     });
     render(<><MapWorkspace session={current} archived={false} /><Discovery session={current} requestVersion={1} category="all" archived={false} /></>);
     await userEvent.selectOptions(screen.getByLabelText('查看发现轮次'), discoveryRun.id);
-    await waitFor(() => expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy());
+    await waitFor(() => expect(card('花港').getByRole('button', { name: '调整地点' })).toBeTruthy());
     let finish!: (value: PlacesSnapshot) => void;
     vi.mocked(api.places).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     await userEvent.click(card('太子湾').getByRole('button', { name: '加入地图' }));
     await waitFor(() => expect(current.workspace.getSnapshot().value.map_visible_ids).toEqual(['candidate-0']));
     expect(current.getPlacesSnapshot().snapshot?.run_id).toBe(discoveryRun.id);
-    expect(card('太子湾').getByText('人工确认地点')).toBeTruthy();
-    expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy();
+    expect(card('太子湾').getByText('用户已选地点')).toBeTruthy();
+    expect(card('花港').getByRole('button', { name: '调整地点' })).toBeTruthy();
     await act(async () => { finish(structuredClone(snapshot)); });
     await userEvent.click(card('太子湾').getByRole('button', { name: '加入行程' }));
     await waitFor(() => expect(current.workspace.getSnapshot().value.selected_ids).toEqual(['candidate-0']));
-    expect(card('花港').getByRole('button', { name: '确认具体地点' })).toBeTruthy();
+    expect(card('花港').getByRole('button', { name: '调整地点' })).toBeTruthy();
     expect((screen.getByLabelText('查看发现轮次') as HTMLSelectElement).value).toBe(discoveryRun.id);
     expect(api.places).toHaveBeenLastCalledWith('one', discoveryRun.id);
   });
@@ -173,19 +236,19 @@ describe('P3 map and candidate operations', () => {
     expect(card('候选10').getByText(/地图未展示/)).toBeTruthy();
     expect(current.workspace.getSnapshot().value.selected_ids).toEqual([]);
   });
-  it('keeps ambiguous and generic candidates off the map and confirms a branch only after the user chooses it', async () => {
+  it('keeps unresolved legacy options adjustable and generic hints off the map', async () => {
     snapshot.candidates = [candidate(0, { name: '同名咖啡店' }), candidate(1, { name: '当地小吃', kind: 'generic' })];
     snapshot.matches = [match(0, { status: 'ambiguous', poi: null, options: [poi(0), poi(1)] })];
     vi.spyOn(api, 'confirmPlace').mockResolvedValue(snapshot);
     render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
     await screen.findByRole('heading', { name: '同名咖啡店' });
-    await userEvent.click(card('同名咖啡店').getByRole('button', { name: '确认具体地点' }));
+    await userEvent.click(card('同名咖啡店').getByRole('button', { name: '调整地点' }));
     expect(card('当地小吃').queryByRole('button', { name: '加入地图' })).toBeNull();
     expect(card('同名咖啡店').queryByRole('button', { name: '加入地图' })).toBeNull();
     expect(api.confirmPlace).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: /地点1.*核实地址1.*poi-1/ }));
     expect(api.confirmPlace).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: '确认对应地点并保存' }));
+    await userEvent.click(screen.getByRole('button', { name: '保存地点调整' }));
     await waitFor(() => expect(api.confirmPlace).toHaveBeenCalledWith('one', 'candidate-0', 1, 1, 'poi-1'));
   });
   it('restores saved points and refreshes Top8 only after explicit confirmation', async () => {
@@ -209,9 +272,9 @@ describe('P3 map and candidate operations', () => {
     snapshot.matches = [match(0, { status: 'ambiguous', poi: null, options: [{ ...poi(0), name: null }] })];
     vi.spyOn(api, 'confirmPlace').mockResolvedValue(snapshot);
     render(<Discovery session={current} requestVersion={1} category="all" archived={false} />);
-    await userEvent.click(await screen.findByRole('button', { name: '确认具体地点' }));
+    await userEvent.click(await screen.findByRole('button', { name: '调整地点' }));
     await userEvent.click(screen.getByRole('button', { name: /名称未返回（ID poi-0）.*120, 30/ }));
-    await userEvent.click(screen.getByRole('button', { name: '确认对应地点并保存' }));
+    await userEvent.click(screen.getByRole('button', { name: '保存地点调整' }));
     await waitFor(() => expect(api.confirmPlace).toHaveBeenCalledWith('one', 'candidate-0', 1, 1, 'poi-0'));
   });
   it('never guesses origin coordinates and requires explicit confirmation of a searched or map-picked point', async () => {

@@ -36,6 +36,7 @@ function session(value: Trip) { const created = new TripSession(value, () => {})
 beforeEach(() => {
   vi.spyOn(api, 'candidates').mockResolvedValue(page());
   vi.spyOn(api, 'places').mockImplementation(async (id, runId) => ({ trip: trip(id), run_id: runId ?? null, request_version: 1, candidates: [], matches: [], points: [] }));
+  vi.spyOn(api, 'matchPlaces').mockImplementation(async (id, _version, _workspaceVersion, runId) => ({ trip: trip(id), run_id: runId, request_version: 1, candidates: [], matches: [], points: [] }));
   vi.spyOn(api, 'gaps').mockResolvedValue({ items: [] });
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
@@ -43,6 +44,23 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessions.splice(0).forEach(value => value.dispose()); vi.restoreAllMocks(); });
 
 describe('source-grounded discovery', () => {
+  it.each([
+    [0, 0, '本轮超时，尚无成功分析'],
+    [1, 0, '本轮超时，已保留部分分析'],
+    [0, 1, '本轮超时，已保留部分分析'],
+  ] as const)('explains time exhaustion with new %i and inherited %i analyses', (newCount, inheritedCount, label) => {
+    const stopped = run('one', {
+      status: 'partial', stage: 'extracting', stop_reason: 'time_budget_exhausted',
+      usage: { steps: 4, elapsed_seconds: 600, external_calls: 2, model_tokens: 300, images: 3, notes_analyzed: newCount },
+      result: { coverage: { notes_reused_analyzed: inheritedCount }, partial_reasons: ['time_budget_exhausted'] },
+    });
+    render(<Discovery session={session(trip('one', [stopped]))} requestVersion={1} category="all" archived={false} />);
+    expect(screen.getByText(label, { selector: 'strong' }).closest('[role="status"]')).toBeTruthy();
+    expect(screen.getAllByText(/本轮运行时间已用尽/).length).toBeGreaterThan(0);
+    expect(screen.queryByText('部分完成')).toBeNull();
+    expect(screen.queryByText(/未完成项：time_budget_exhausted/)).toBeNull();
+  });
+
   it('keeps atomic message retries on the original operation, version and budget after an uncertain response', async () => {
     const current = session(trip('one'));
     current.request.update({ name: 'one', request: { ...current.trip.request, origin: '杭州' } });
@@ -259,7 +277,7 @@ describe('source-grounded discovery', () => {
     expect(screen.getByText(/模型调用结果未知，可能已执行，费用尚未确认/)).toBeTruthy();
     expect(screen.getByText(/本轮不能恢复，请确认新增预算后继续一轮/)).toBeTruthy();
     expect(screen.getByText(/未结清预留 token 32,768/)).toBeTruthy();
-    expect(screen.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
+    expect(screen.getByText('地点采用自动匹配，来源分析与地点选择可能有误，可随时调整。')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '恢复发现任务' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '继续一轮（新增预算）' }));
     expect(api.startDiscovery).not.toHaveBeenCalled();
@@ -291,7 +309,7 @@ describe('source-grounded discovery', () => {
     expect(reasons).toContain('本轮选取的部分评论尚未完成分析。');
     expect(reasons).toContain('有来源的探索方向不足两个，暂无法充分比较。');
     expect(reasons.match(/本轮新增取得的笔记未达到目标数量/g)).toHaveLength(1);
-    expect(coverage.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
+    expect(coverage.getByText('地点采用自动匹配，来源分析与地点选择可能有误，可随时调整。')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '恢复发现任务' })).toBeNull();
   });
 
@@ -309,7 +327,7 @@ describe('source-grounded discovery', () => {
     expect(coverage.getByText(/部分活动引用未通过校验，已保留有效评论；相关活动未纳入候选。/)).toBeTruthy();
     if (rejected === undefined) expect(coverage.queryByText('引用校验未通过活动')).toBeNull();
     else expect(coverage.getByText('引用校验未通过活动').closest('div')?.querySelector('strong')?.textContent).toBe(String(rejected));
-    expect(coverage.getByText('本轮候选未经逐条核实，请结合原文核对。')).toBeTruthy();
+    expect(coverage.getByText('地点采用自动匹配，来源分析与地点选择可能有误，可随时调整。')).toBeTruthy();
   });
 
   it('shows first analysis of reused sources separately from zero new collection and actual charged usage', () => {

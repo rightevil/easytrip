@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from easytrip.services.places import match_pois, normalize_poi, rank_candidates
+from easytrip.services.places import (
+    match_pois,
+    normalize_poi,
+    rank_candidates,
+    select_poi,
+)
 
 READ_AT = "2026-10-14T10:00:00+08:00"
 POI_QUALITY = json.loads(
@@ -83,6 +88,69 @@ def test_complete_exact_same_city_category_is_unique():
     assert result["status"] == "unique"
     assert result["poi"]["id"] == "B001"
     assert result["options"] == [result["poi"]]
+
+
+def test_automatic_selection_resolves_county_and_prefers_the_place_over_related_facilities():
+    rows = [
+        raw_poi("hotel", "松兰山小宿", cityname="宁波市", type="住宿服务;宾馆酒店"),
+        raw_poi("resort", "宁波松兰山滨海旅游度假区", cityname="宁波市"),
+        raw_poi("bus", "松兰山(公交站)", cityname="宁波市", type="交通设施服务;公交车站"),
+    ]
+    result = select_poi(
+        candidate(name="松兰山", city="象山"), [],
+        {"status": "1", "pois": rows, "search_complete": False}, READ_AT,
+    )
+    assert result["status"] == "unique" and result["poi"]["id"] == "resort"
+    assert len(result["options"]) == 3
+    assert "可随时调整" in result["reason"] and "尚未穷尽" in result["reason"]
+
+
+def test_automatic_selection_keeps_explicit_branches_and_rejects_unrelated_results():
+    rows = [
+        raw_poi("wrong", "星巴克(鼓楼店)", type="餐饮服务;咖啡厅"),
+        raw_poi("right", "星巴克(湖滨店)", type="餐饮服务;咖啡厅"),
+    ]
+    result = select_poi(
+        candidate(name="星巴克（湖滨店）", category="eat"), [],
+        {"status": "1", "pois": rows, "search_complete": False}, READ_AT,
+    )
+    assert result["poi"]["id"] == "right"
+    wrong = select_poi(
+        candidate(name="星巴克（湖滨店）", category="eat"), [],
+        {"status": "1", "pois": rows[:1], "search_complete": False}, READ_AT,
+    )
+    assert wrong["poi"] is None
+    unrelated = select_poi(
+        candidate(), [], {"status": "1", "pois": [raw_poi(name="雷峰塔")]}, READ_AT,
+    )
+    assert unrelated["poi"] is None
+
+
+@pytest.mark.parametrize("changes", [{"location": "nan,30"}, {"cityname": []}, {"name": []}])
+def test_automatic_selection_does_not_invent_missing_provider_facts(changes):
+    result = select_poi(candidate(), [], {"status": "1", "pois": [raw_poi(**changes)]}, READ_AT)
+    assert result["poi"] is None
+
+
+@pytest.mark.parametrize(
+    "name,category,provider_name,provider_type",
+    [
+        ("孤独酒吧", "eat", "孤独沙滩 咖啡&酒吧 Lonely Cafe&Bar", "体育休闲服务;娱乐场所;酒吧"),
+        ("青年与海营地", "stay", "青年与海营地", "体育休闲服务;休闲场所;露营地"),
+        ("白日梦径", "play", "白日梦径", "风景名胜;风景名胜;风景名胜"),
+    ],
+)
+def test_provider_categories_and_missing_area_labels_do_not_require_user_confirmation(
+    name, category, provider_name, provider_type
+):
+    item = candidate(name=name, category=category, city="象山", mention_ids=["m"])
+    result = select_poi(
+        item, [{"id": "m", "name": name, "branch_hint": "松兰山"}],
+        {"status": "1", "pois": [raw_poi(name=provider_name, cityname="宁波市", type=provider_type)]},
+        READ_AT,
+    )
+    assert result["status"] == "unique" and result["poi"]["name"] == provider_name
+    assert "区域线索未全部对应" in result["reason"]
 
 
 @pytest.mark.parametrize(

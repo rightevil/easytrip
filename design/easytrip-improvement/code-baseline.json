@@ -1,0 +1,215 @@
+{
+  "head": "81539baab4c02c1415267cfa2697af1b88274ca1",
+  "changes": [
+    {
+      "path": ".gitignore",
+      "state": "modified",
+      "sha256": "4561e7d6fafad7fbb585ecc6364ef558748eb81bcb1edafe66932943ca1713be"
+    },
+    {
+      "path": "README.md",
+      "state": "modified",
+      "sha256": "e2e98a21fc8aa2d75c27a5a25865f14465a278749b1208625e541f845ff10096"
+    },
+    {
+      "path": "backend/README.md",
+      "state": "modified",
+      "sha256": "b389bc48e07ddf1905d9351d1f400813e37ec3748e13c826c30609f185a586e8"
+    },
+    {
+      "path": "backend/easytrip/agent/content.py",
+      "state": "modified",
+      "sha256": "63021c0070ae80db758a9f6a647fe6a5a294c57cb8d5095775323f1c0f0cce40"
+    },
+    {
+      "path": "backend/easytrip/agent/discovery.py",
+      "state": "modified",
+      "sha256": "6f2e8e816aa3e2cbb8fc873961be34a4488c8a9b183e7305db0bb42b552f049d"
+    },
+    {
+      "path": "backend/easytrip/api/README.md",
+      "state": "modified",
+      "sha256": "325df865fa670acc9efd8ebbfba74462b22188801ff95c6364416faf8c2a302e"
+    },
+    {
+      "path": "backend/easytrip/api/places.py",
+      "state": "modified",
+      "sha256": "f34e0b1eb62398f9fc9979b42fd78a2f587f9772b0e1689b60c077b9ae27ccd7"
+    },
+    {
+      "path": "backend/easytrip/api/settings.py",
+      "state": "untracked",
+      "sha256": "a4ad6b1426a69d899ae9832374cdf1e52b1e1ed88c59c0b706ec445fef887ac8"
+    },
+    {
+      "path": "backend/easytrip/config.py",
+      "state": "modified",
+      "sha256": "fabc11fedcc4d2dddad9586d8c1ae54887caece34bde6ec8fb62edeea92948e6"
+    },
+    {
+      "path": "backend/easytrip/desktop.py",
+      "state": "untracked",
+      "sha256": "4d185fa45bd74506bce8ba000fdd9f31c8c24f55238f3a78998da59c068d3ae6"
+    },
+    {
+      "path": "backend/easytrip/diagnostics.py",
+      "state": "modified",
+      "sha256": "2daebaf017b4acea14e38362541f989d6dbb256419f46c6128fe0fba6c11e04c"
+    },
+    {
+      "path": "backend/easytrip/domain/discovery_tasks.py",
+      "state": "modified",
+      "sha256": "b2443a2b105f2886790eb984d399e7e9bf47787cf89d14df48a6614d3845dd7b"
+    },
+    {
+      "path": "backend/easytrip/main.py",
+      "state": "modified",
+      "sha256": "82a1b20132e053cc8d308fcd1d2ca3e9c3a47585dc37dfbc8e39e09c11a1606f"
+    },
+    {
+      "path": "backend/easytrip/services/meals.py",
+      "state": "modified",
+      "sha256": "a4eba3e55293d570646762ba153b784251a75adea2bfb59d21c47b586329606f"
+    },
+    {
+      "path": "backend/easytrip/services/places.py",
+      "state": "modified",
+      "sha256": "07909a4d94dbc841c3d36ae0f678b3a00a4d1f1927e3088270c0035c603ea779"
+    },
+    {
+      "path": "backend/easytrip/storage/places.py",
+      "state": "modified",
+      "sha256": "3edeabb1339847c1bbfc4b09dca3ceef9344110aa2ecb9764f1dad89fa94a7e2"
+    },
+    {
+      "path": "backend/pyproject.toml",
+      "state": "modified",
+      "sha256": "8bee303586d91282a5a8371b54d17dac4c2fbf9a189ed4c0151164a9def04f76"
+    },
+    {
+      "path": "backend/tests/test_config.py",
+      "state": "modified",
+      "sha256": "1e6e29418a84b870c12fb283395ef4574024c2745b129d260a0d0f504acd7663"
+    },
+    {
+      "path": "backend/tests/test_desktop.py",
+      "state": "untracked",
+      "sha256": "40a1c4f817ca787b4a495a2853c5678aa09a37e2b3d9c38f1d046a5f0fec52d5"
+    },
+    {
+      "path": "backend/tests/test_discovery_pipeline.py",
+      "state": "modified",
+      "sha256": "a05b2df2042a11fa7d6c2707d5f4b16f96061157d64960f87eaa366b88db5d09"
+    },
+    {
+      "path": "backend/tests/test_discovery_priority.py",
+      "state": "untracked",
+      "sha256": "86659ace9a75ea6e5bfc443d1cd8832fc93f106241e63e1cbef9d75c8b0da77a"
+    },
+    {
+      "path": "backend/tests/test_lodgings.py",
+      "state": "modified",
+      "sha256": "543bbaf18e22e39f2c18b8ca9da2859501fd1f893e7a325e4c46f6f30f127464"
+    },
+    {
+      "path": "backend/tests/test_meals.py",
+      "state": "modified",
+      "sha256": "682eb369dcfa505d4226c76333075e06cfe8d5be5319f8e8566d449ac9189e35"
+    },
+    {
+      "path": "backend/tests/test_places.py",
+      "state": "modified",
+      "sha256": "85b8cad0aade3bf156f63e9851d9aec83a4a5793ede1f572f287629a5d9a0605"
+    },
+    {
+      "path": "backend/tests/test_places_service.py",
+      "state": "modified",
+      "sha256": "61f67c0e1cb0f3b0b705d42c58ca50a248fef35dfa5325c6fc45c97c865f3cb6"
+    },
+    {
+      "path": "backend/tests/test_settings.py",
+      "state": "untracked",
+      "sha256": "921dd91c58f76e79b2ef6068917b0226d62c61163667efa9b7b617c14c0e6edc"
+    },
+    {
+      "path": "backend/uv.lock",
+      "state": "modified",
+      "sha256": "831f43c7458b378409a74cebcec5b42ec6b761640149c75645ff0870fe525064"
+    },
+    {
+      "path": "frontend/src/App.tsx",
+      "state": "modified",
+      "sha256": "11c6e8f15978f3b87a99925a955ae91e3da9921870170cc553b6ea4c67efa386"
+    },
+    {
+      "path": "frontend/src/Discovery.test.tsx",
+      "state": "modified",
+      "sha256": "9c20ad72f4cdc6d5adaaeb786b280267310aa1ce7c018c58fb785997a0a2283e"
+    },
+    {
+      "path": "frontend/src/Discovery.tsx",
+      "state": "modified",
+      "sha256": "b72897a79231060ba56011c2a16a5619dad09a628f3ef902bde7a8e4315c6e2a"
+    },
+    {
+      "path": "frontend/src/MapWorkspace.tsx",
+      "state": "modified",
+      "sha256": "9c08303401689d2e801d6bbe87963a5b2072959699615b26e78c88f7dcd037e2"
+    },
+    {
+      "path": "frontend/src/Places.test.tsx",
+      "state": "modified",
+      "sha256": "e1ccc3281cfd31b37c0a9f767f6058223edc84fe3de30971eb6dfa01e36341c8"
+    },
+    {
+      "path": "frontend/src/Settings.test.tsx",
+      "state": "untracked",
+      "sha256": "1a91186b0bf50fbde552f2d4de3b6e3332b6767dfcfb5dc48297926f6e0a2e65"
+    },
+    {
+      "path": "frontend/src/Settings.tsx",
+      "state": "untracked",
+      "sha256": "9cd38de23b34ae48fbd486623508629aa46c23b6062fcb06fb5619fd421a7c4d"
+    },
+    {
+      "path": "frontend/src/api.test.ts",
+      "state": "modified",
+      "sha256": "f54f4c7bda8a130436367dd9574a9381f039b28707126daf874ae8723357be63"
+    },
+    {
+      "path": "frontend/src/api.ts",
+      "state": "modified",
+      "sha256": "7bc733fb41990f907b30c17e1d55430fd2c40740d9d526669cb8dac248cdf0c1"
+    },
+    {
+      "path": "frontend/src/discovery-types.ts",
+      "state": "modified",
+      "sha256": "b11d8c4baa9fb2a9810f69d60fb8222c3a66bf06374c0bd9dfd9d9565ed4378d"
+    },
+    {
+      "path": "frontend/src/session.ts",
+      "state": "modified",
+      "sha256": "bb283c052042b642329990636f87c9b2bf9201544bf77fc98e668afe7884d5fc"
+    },
+    {
+      "path": "frontend/src/styles.css",
+      "state": "modified",
+      "sha256": "9d2a1568c49d7feffc2916ba9204d256fe505703a83d48cee614d65d62ded45b"
+    },
+    {
+      "path": "scripts/EasyTrip.spec",
+      "state": "untracked",
+      "sha256": "5c80e5cdb58c37c2e3cf223c625aabacfdd6c8bc0f64106bc0b34994a74e6815"
+    },
+    {
+      "path": "scripts/build-desktop.ps1",
+      "state": "untracked",
+      "sha256": "642f62828b36742889bbc0af80690532c709baa6ca3ebcab59cdf98deceb3522"
+    },
+    {
+      "path": "scripts/desktop_entry.py",
+      "state": "untracked",
+      "sha256": "78aab849f8928bcebc0b22a0357c4a01bc8f26318384591da8e5593ca5834fab"
+    }
+  ]
+}

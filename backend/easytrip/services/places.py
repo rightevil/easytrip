@@ -4,6 +4,7 @@ import math
 import re
 import unicodedata
 from datetime import datetime
+from difflib import SequenceMatcher
 
 
 def _text(value):
@@ -74,6 +75,76 @@ def _category(poi):
     if types & {"风景名胜", "体育休闲服务", "博物馆", "美术馆", "展览馆", "科技馆"}:
         return "play"
     return None
+
+
+def select_poi(candidate, mentions, response, read_at):
+    """Choose a provider-backed default, keeping alternatives for later adjustment."""
+    result = match_pois(candidate, mentions, response, read_at)
+    if result["status"] != "ambiguous" or candidate.get("kind", "place") != "place":
+        return result
+    members = [
+        row for row in mentions if row.get("id") in candidate.get("mention_ids", [])
+    ]
+    names = {
+        _name(candidate.get("name")), *(_name(row.get("name")) for row in members)
+    } - {""}
+    chinese_names = {re.sub(r"[^\u4e00-\u9fff0-9]", "", name) for name in names} - {""}
+    branches = {_name(row.get("branch_hint")) for row in [candidate, *members]} - {""}
+    explicit_branches = re.findall(r"\(([^()]+)\)", _name(candidate.get("name")))
+    branches.update(explicit_branches)
+    branches = {
+        branch for branch in branches
+        if len(branch) >= 2 and branch not in {"分店", "附近", "旁边", "附近店"}
+    }
+    ranked = []
+    for poi in result["options"]:
+        if not poi["name"] or not poi["city"]:
+            continue
+        name, address = _name(poi["name"]), _name(poi["address"])
+        if explicit_branches and not all(
+            branch in name or branch in address for branch in explicit_branches
+        ):
+            continue
+        similarity = max(
+            (SequenceMatcher(None, name, original).ratio() for original in names),
+            default=0,
+        )
+        chinese_name = re.sub(r"[^\u4e00-\u9fff0-9]", "", name)
+        if chinese_name and chinese_names:
+            similarity = max(
+                similarity,
+                max(SequenceMatcher(None, chinese_name, original).ratio() for original in chinese_names),
+            )
+        if any(
+            min(len(name), len(original)) >= 2
+            and (original in name or name in original)
+            for original in names
+        ):
+            similarity = max(similarity, 0.85)
+        if similarity < 0.55:
+            continue
+        score = (
+            similarity + 0.1 * (_category(poi) == candidate.get("category"))
+            + 0.05 * (_city(poi["city"]) == _city(candidate.get("city")))
+            + 0.1 * sum(branch in name or branch in address for branch in branches) / max(1, len(branches))
+        )
+        ranked.append((score, poi))
+    if ranked:
+        # shortcut: ties keep provider order; add route context when branch proximity is needed.
+        chosen = max(ranked, key=lambda item: item[0])[1]
+        result.update(
+            status="unique", poi=chosen,
+            reason=(
+                f"自动综合名称、类别、分店及区域线索选用“{chosen['name']}”；"
+                "保留其它备选，可随时调整。"
+                + ("检索结果尚未穷尽。" if not response.get("search_complete") else "")
+                + ("高德类别与来源分类有差异。" if _category(chosen) not in (None, candidate.get("category")) else "")
+                + ("来源中的分店或区域线索未全部对应。" if any(branch not in _name(chosen["name"]) and branch not in _name(chosen["address"]) for branch in branches) else "")
+            ),
+        )
+    else:
+        result["reason"] = "暂未找到名称、类别及分店线索相符的可用地点，保留线索；可稍后调整。"
+    return result
 
 
 def _base_name(value):

@@ -82,12 +82,12 @@ export class ApiError extends Error {
     super(message);
   }
 }
-async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+async function call<T>(path: string, method = 'GET', body?: unknown, headers?: Record<string, string>): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: body === undefined ? headers : { 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'same-origin',
     });
@@ -104,7 +104,33 @@ async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T>
   return response.json() as Promise<T>;
 }
 
+export type SettingName = 'xhs_mcp' | 'rail_mcp' | 'amap_web_key' | 'amap_js_key' | 'amap_js_secure_key' | 'amap_mcp_url' | 'model_base_url' | 'model_api_key' | 'model_id';
+export type ConfigurationChecks = Record<string, { state: 'invalid' | 'unconfigured' | 'incomplete' | 'configured_not_probed'; missing: SettingName[]; invalid: SettingName[] }>;
+export interface AppSettings {
+  fields: Record<SettingName, { configured: boolean; value: string }>;
+  revision: string;
+  restart_required: boolean;
+  config_path: string;
+  checks: ConfigurationChecks;
+  setup_required: boolean;
+}
+export interface SettingsImport {
+  imported_fields: SettingName[];
+  ignored_fields: number;
+  skipped_empty: number;
+  checks: ConfigurationChecks;
+  settings?: AppSettings;
+}
+
 export const api = {
+  settings: () => call<AppSettings>('/settings'),
+  saveSettings: (revision: string, changes: Partial<Record<SettingName, string>>) =>
+    call<AppSettings>('/settings', 'PUT', { revision, changes }, { 'X-EasyTrip-Settings': '1' }),
+  checkSettings: (revision: string, changes: Partial<Record<SettingName, string>>) =>
+    call<{ checks: ConfigurationChecks }>('/settings/check', 'POST', { revision, changes }, { 'X-EasyTrip-Settings': '1' }),
+  importSettings: (revision: string, content: string, apply = false) =>
+    call<SettingsImport>('/settings/import', 'POST', { revision, content, apply }, { 'X-EasyTrip-Settings': '1' }),
+  completeSetup: () => call<{ setup_required: boolean }>('/settings/setup-complete', 'POST', {}, { 'X-EasyTrip-Settings': '1' }),
   usage: (id: string) => call<UsageReport>(`/trips/${encodeURIComponent(id)}/usage`),
   searchRail: (id: string, query: RailSearchQuery) => call<RailSearchResult>(`/trips/${encodeURIComponent(id)}/rail/search`, 'POST', query),
   startPlanning: (id: string, operation_id: string, expected_version: number, budget: PlanningBudget, parent_plan_id?: string) => call<Run>(`/trips/${encodeURIComponent(id)}/runs`, 'POST', { kind: 'plan', operation_id, expected_version, budget, ...(parent_plan_id ? { parent_plan_id } : {}) }),
@@ -148,8 +174,8 @@ export const api = {
     call<ManualPlaceSearch>(`/trips/${encodeURIComponent(id)}/places/manual/search?query=${encodeURIComponent(query)}&city=${encodeURIComponent(city)}&expected_version=${expected_version}`),
   confirmManualPlace: (id: string, confirmation: ManualPlaceConfirmation) =>
     call<PlacesSnapshot & { candidate_id: string }>(`/trips/${encodeURIComponent(id)}/places/manual/confirm`, 'POST', confirmation),
-  matchPlaces: (id: string, expected_version: number, expected_workspace_version: number, run_id: string) =>
-    call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/match`, 'POST', { expected_version, expected_workspace_version, run_id, refresh_map: false }),
+  matchPlaces: (id: string, expected_version: number, expected_workspace_version: number, run_id: string, candidate_ids?: string[]) =>
+    call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/match`, 'POST', { expected_version, expected_workspace_version, run_id, refresh_map: false, ...(candidate_ids ? { candidate_ids } : {}) }),
   confirmPlace: (id: string, candidate_id: string, expected_version: number, expected_workspace_version: number, poi_id: string) =>
     call<PlacesSnapshot>(`/trips/${encodeURIComponent(id)}/places/candidates/${encodeURIComponent(candidate_id)}/confirm`, 'POST', { expected_version, expected_workspace_version, poi_id }),
   mapAction: (id: string, expected_version: number, expected_workspace_version: number, action: MapAction, options: { candidate_id?: string; category?: Workspace['category']; city?: string | null } = {}) => {

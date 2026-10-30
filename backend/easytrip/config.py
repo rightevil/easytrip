@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,7 +14,29 @@ from dotenv import dotenv_values
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 ROOT_DIR = BACKEND_DIR.parent
 DATA_DIR = ROOT_DIR / "data"
+if getattr(sys, "frozen", False):
+    ROOT_DIR = Path(sys._MEIPASS)
+    DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "EasyTrip"
 EXPORT_DIR = ROOT_DIR / "reports" / "p0"
+ALIASES = {
+    "rail_mcp": "12306_MCP",
+    "model_base_url": "AGNES_URL",
+    "model_api_key": "AGNES_KEY",
+    "model_id": "AGNES_MODEL",
+}
+
+
+def settings_overrides(path: Path):
+    return normalize_settings(dotenv_values(path, interpolate=False, encoding="utf-8-sig"))
+
+
+def normalize_settings(values):
+    values = {key.upper(): value for key, value in values.items()}
+    return {
+        name: (values.get(name.upper(), values.get(ALIASES.get(name))) or "").strip()
+        for name in Settings.__dataclass_fields__
+        if name != "secrets" and (name.upper() in values or ALIASES.get(name) in values)
+    }
 
 
 @dataclass(repr=False)
@@ -30,8 +53,8 @@ class Settings:
     secrets: set[str] = field(default_factory=set, repr=False)
 
     @classmethod
-    def load(cls):
-        values = {
+    def load(cls, overrides_path: Path | None = None, *, isolated=False):
+        values = {} if isolated else {
             **dotenv_values(ROOT_DIR / ".env"),
             **dotenv_values(BACKEND_DIR / ".env"),
             **os.environ,
@@ -43,16 +66,14 @@ class Settings:
                 if name != "secrets"
             }
         )
-        aliases = {
-            "rail_mcp": "12306_MCP",
-            "model_base_url": "AGNES_URL",
-            "model_api_key": "AGNES_KEY",
-            "model_id": "AGNES_MODEL",
-        }
         folded = {key.upper(): value for key, value in values.items()}
-        for name, alias in aliases.items():
+        for name, alias in ALIASES.items():
             if not getattr(settings, name):
                 setattr(settings, name, (folded.get(alias) or "").strip())
+        # Saved desktop choices, including explicit clears, override legacy aliases.
+        path = overrides_path if overrides_path is not None else DATA_DIR / ".env"
+        for name, value in settings_overrides(path).items():
+            setattr(settings, name, value)
         settings.secrets.update(
             value
             for name, value in vars(settings).items()
@@ -124,5 +145,45 @@ def validate_url(url: str):
         or not parsed.hostname
         or parsed.username
         or parsed.password
+        or parsed.fragment
+        or any(character.isspace() or ord(character) < 32 for character in url)
+        or parsed.port == 0
     ):
         raise ValueError("配置 URL 必须是无内嵌账号密码的 HTTP(S) 地址")
+
+
+URL_FIELDS = {"xhs_mcp", "rail_mcp", "amap_mcp_url", "model_base_url"}
+
+
+def validate_setting(name: str, value: str):
+    if len(value) > 4096 or any(ord(c) < 32 or c == "\ufffd" for c in value):
+        raise ValueError("配置包含无效字符")
+    if name in URL_FIELDS and value.strip():
+        validate_url(value.strip())
+
+
+def configuration_checks(values):
+    groups = {
+        "xhs_mcp": ("xhs_mcp",),
+        "model": ("model_base_url", "model_api_key", "model_id"),
+        "amap_web": ("amap_web_key",),
+        "amap_js": ("amap_js_key", "amap_js_secure_key"),
+        "rail_mcp": ("rail_mcp",),
+        "amap_mcp": ("amap_mcp_url",),
+    }
+    checks = {}
+    for service, names in groups.items():
+        missing = [name for name in names if not values[name].strip()]
+        invalid = []
+        for name in names:
+            try:
+                validate_setting(name, values[name])
+            except ValueError:
+                invalid.append(name)
+        checks[service] = {
+            "state": "invalid" if invalid else "unconfigured" if len(missing) == len(names)
+            else "incomplete" if missing else "configured_not_probed",
+            "missing": missing,
+            "invalid": invalid,
+        }
+    return checks

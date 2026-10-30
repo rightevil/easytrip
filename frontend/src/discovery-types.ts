@@ -12,7 +12,7 @@ export interface DiscoveryBudget {
   max_tokens: number;
 }
 export const defaultDiscoveryBudget: DiscoveryBudget = {
-  max_steps: 160, max_seconds: 600, max_searches: 8, target_notes: 30, comment_limit: 20,
+  max_steps: 160, max_seconds: 1800, max_searches: 8, target_notes: 30, comment_limit: 20,
   include_replies: false, reply_limit: 20, reserved_gap_searches: 2,
   max_model_calls: 64, max_images: 90, max_tokens: 800000,
 };

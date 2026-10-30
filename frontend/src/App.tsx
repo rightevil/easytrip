@@ -9,6 +9,7 @@ import { Discovery } from './Discovery';
 import { MapWorkspace } from './MapWorkspace';
 import { Planning } from './Planning';
 import { Usage } from './Usage';
+import { Settings } from './Settings';
 
 const labels = { saved: '已保存', dirty: '等待保存', saving: '保存中', error: '保存失败', conflict: '发生版本冲突' };
 const transports: [TripRequest['transport'], string][] = [['mixed', '灵活组合'], ['walking', '步行'], ['transit', '公共交通'], ['bicycling', '骑行'], ['electrobike', '电动车'], ['driving', '自驾']];
@@ -34,6 +35,9 @@ export function App() {
   const [leave, setLeave] = useState<(() => Promise<void>) | null>(null);
   const [allowLeave, setAllowLeave] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [onboarding, setOnboarding] = useState(() => new URLSearchParams(window.location.search).get('setup') === '1');
+  const [settingsOpen, setSettingsOpen] = useState(onboarding);
+  const [settingsVisited, setSettingsVisited] = useState(onboarding);
   const sessions = useRef(new Map<string, TripSession>());
   const operation = useRef<string | null>(null);
   const loadSequence = useRef(0);
@@ -96,6 +100,7 @@ export function App() {
     const cached = sessions.current.get(id);
     if (cached && !cached.dirty) cached.accept(trip);
     setActive(cached ?? makeSession(trip));
+    setSettingsOpen(false);
   };
   const guarded = async (action: () => Promise<void>, canRetain = true) => {
     if (busyRef.current) return;
@@ -113,6 +118,7 @@ export function App() {
     const trip = await api.create(operation.current);
     operation.current = null;
     upsert(trip); setTotal(value => value + 1); setActive(makeSession(trip));
+    setSettingsOpen(false);
   });
   const archive = () => guarded(async () => {
     if (!active) return;
@@ -150,19 +156,26 @@ export function App() {
       }} />显示归档行程</label>
       <nav className="trip-list" aria-label="选择行程">
         {loading && <p className="muted sidebar-note" role="status">正在读取行程…</p>}
-        {!loading && items.filter(trip => includeArchived || trip.status !== 'archived').map(trip => <button key={trip.id} disabled={busy} className={`trip-card ${active?.trip.id === trip.id ? 'active' : ''}`} aria-current={active?.trip.id === trip.id ? 'page' : undefined} onClick={() => { if (active?.trip.id !== trip.id) void guarded(() => select(trip.id)); }}>
+        {!loading && items.filter(trip => includeArchived || trip.status !== 'archived').map(trip => <button key={trip.id} disabled={busy} className={`trip-card ${active?.trip.id === trip.id ? 'active' : ''}`} aria-current={!settingsOpen && active?.trip.id === trip.id ? 'page' : undefined} onClick={() => { if (active?.trip.id !== trip.id) void guarded(() => select(trip.id)); else setSettingsOpen(false); }}>
           <span className="trip-icon" aria-hidden="true">↗</span><span className="trip-info"><strong>{trip.name}</strong><small>{trip.request?.destination || '目的地待定'} · {dateLabel(trip.updated_at)}{trip.status === 'archived' ? ' · 已归档' : ''}</small></span><span className="trip-arrow" aria-hidden="true">›</span>
         </button>)}
         {!loading && !items.length && <p className="muted sidebar-note">还没有行程。<br />从一个想法开始。</p>}
         {items.length < total && <button className="text-button" disabled={loading || busy} onClick={() => { void refreshList(includeArchived, true).catch(reason => setError(message(reason))); }}>加载更多行程</button>}
       </nav>
+      <button className="settings-link" aria-current={settingsOpen ? 'page' : undefined} disabled={busy} onClick={() => { void guarded(async () => { setSettingsVisited(true); setSettingsOpen(true); }); }}>设置</button>
       <div className="sidebar-footer"><span className="local-dot" aria-hidden="true" />本机保存<span className="muted">SQLite</span><a href="/p0/map" target="_blank" rel="noreferrer">P0 地图验证 ↗</a></div>
     </aside>
     <main id="workspace" className="main" tabIndex={-1}>
+      {settingsVisited && <div hidden={!settingsOpen}><Settings onboarding={onboarding} onClose={() => {
+        setSettingsOpen(false); setOnboarding(false);
+        if (onboarding) { const url = new URL(window.location.href); url.searchParams.delete('setup'); window.history.replaceState(null, '', url); }
+      }} /></div>}
+      <div hidden={settingsOpen}>
       {error && <div className="global-error" role="alert"><span>{error}</span><button className="text-button" onClick={() => { setError(null); void refreshList().catch(reason => setError(message(reason))); }}>重新读取</button><button className="icon-button" aria-label="关闭提示" onClick={() => setError(null)}>×</button></div>}
       {active ? <TripView key={active.trip.id} session={active} archived={active.trip.status === 'archived'} onTrip={upsert} onArchive={archive} onDelete={() => setDeleting(true)} busy={busy} /> : <div className="welcome">
         <span className="eyebrow">给下一段旅程留一点空间</span><h1>从想去的地方，<br />或一个模糊的想法开始。</h1><p>保存你的出发地、时间和偏好，<br />随时回来继续准备。</p><button className="primary" onClick={create} disabled={busy || loading}>{loading ? '正在打开工作区…' : '创建我的第一份行程'}<span aria-hidden="true">↗</span></button><div className="welcome-orbit" aria-hidden="true"><span>出发</span><i /><b>✳</b></div>
       </div>}
+      </div>
     </main>
     {leave && <Modal title="当前编辑还未保存" onClose={() => setLeave(null)}><p>{allowLeave ? '本地编辑仍在当前行程中。保存失败或版本冲突需要处理后才能可靠恢复。' : '归档或删除前必须先保存当前编辑。请先处理保存失败或版本冲突，本地编辑仍保留。'}</p><div className="modal-actions"><button onClick={() => setLeave(null)}>留在当前行程</button>{allowLeave && <button disabled={busy} onClick={() => { void resolveLeave(false); }}>保留本地编辑并继续</button>}<button className="primary" disabled={busy} onClick={() => { void resolveLeave(true); }}>重试保存后继续</button></div></Modal>}
     {deleting && active && <Modal title="删除这份行程？" onClose={() => setDeleting(false)}><p>“{active.trip.name}”的条件、对话和任务记录会一并删除，此操作无法撤销。你也可以归档保留它。</p><div className="modal-actions"><button onClick={() => setDeleting(false)}>保留行程</button><button className="danger" disabled={busy} onClick={remove}>确认删除</button></div></Modal>}

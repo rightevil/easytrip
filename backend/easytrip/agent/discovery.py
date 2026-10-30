@@ -61,6 +61,22 @@ class DiscoveryRunner:
         return None, before, after
 
     async def _understanding(self, run, snapshot, client):
+        parent_id = run["params"].get("parent_run_id")
+        if parent_id and all((self.settings.model_base_url, self.settings.model_api_key, self.settings.model_id)):
+            parent = await self.db("get_run", parent_id, run["trip_id"])
+            previous = parent["checkpoint"].get("understanding")
+            if (
+                parent["kind"] == "discover"
+                and parent["request_version"] == run["request_version"]
+                and parent["params"]["request"] == snapshot.request.model_dump(mode="json")
+                and parent["params"]["messages"] == snapshot.messages
+                and previous is not None
+            ):
+                user_text = "\n".join(self.settings.redact(item["content"]) for item in snapshot.messages if item.get("role") == "user")
+                try:
+                    return validate_understanding(json.dumps(previous), snapshot.request, user_text).model_dump(mode="json")
+                except ValueError:
+                    pass
         cached, before, after = await self.model_hooks(run, "understanding")
         if cached is not None:
             user_text = "\n".join(self.settings.redact(item["content"]) for item in snapshot.messages if item.get("role") == "user")
@@ -79,10 +95,27 @@ class DiscoveryRunner:
             return await self.stages[stage](run, snapshot, client)
         if stage == "understanding":
             return await self._understanding(run, snapshot, client)
-        if stage == "discovering":
-            return await CollectionService(self, run, client).discover(run["checkpoint"]["understanding"]["query_plan"])
-        if stage == "fetching":
-            return await CollectionService(self, run, client).fetch(run["checkpoint"]["discovering"]["feeds"])
+        if stage in {"discovering", "fetching"}:
+            started = monotonic()
+            service = CollectionService(self, run, client)
+            if stage == "discovering" and run["params"].get("parent_run_id"):
+                await service._inherited_success()
+                await analyse(self, run, snapshot, client)
+            # Main collection uses at most one third of the round, leaving time for analysis.
+            remaining = run["budget"]["max_seconds"] / 3 - run["usage"]["elapsed_seconds"] - (monotonic() - started)
+            if remaining > 0:
+                try:
+                    async with asyncio.timeout(remaining):
+                        if stage == "discovering":
+                            return await service.discover(run["checkpoint"]["understanding"]["query_plan"])
+                        return await service.fetch(run["checkpoint"]["discovering"]["feeds"])
+                except TimeoutError:
+                    pass
+            if stage == "discovering":
+                return {"feeds": await self.db("get_run_item", run["id"], "collection:feeds", []), "stop_reason": "collection_time_reserved"}
+            identities = await self.db("get_run_item", run["id"], "collection:notes", [])
+            counts, _ = await service._progress(identities)
+            return {**counts, "stop_reason": "collection_time_reserved"}
         if stage == "extracting":
             return await analyse(self, run, snapshot, client)
         if stage == "evaluating":

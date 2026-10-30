@@ -140,7 +140,7 @@ export class TripSession {
       if (!this.disposed && displayedRun !== this.placesRunId) void this.readPlaces(this.placesRunId);
     }
   }
-  matchPlaces(runId: string) { return this.changePlaces((version, workspaceVersion) => api.matchPlaces(this.trip.id, version, workspaceVersion, runId)); }
+  matchPlaces(runId: string, candidateIds?: string[]) { return this.changePlaces((version, workspaceVersion) => api.matchPlaces(this.trip.id, version, workspaceVersion, runId, candidateIds)); }
   confirmPlace(candidateId: string, poiId: string) { return this.changePlaces((version, workspaceVersion) => api.confirmPlace(this.trip.id, candidateId, version, workspaceVersion, poiId)); }
   getManualPlaceSnapshot = () => this.manualPlace;
   subscribeManualPlace = (listener: () => void) => { this.manualPlaceListeners.add(listener); return () => { this.manualPlaceListeners.delete(listener); }; };

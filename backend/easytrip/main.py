@@ -2,12 +2,13 @@
 
 import asyncio
 import json
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
@@ -19,6 +20,8 @@ from .api.places import _before_amap_request
 from .api.places import make_router as make_places_router
 from .api.planning import make_router as make_planning_router
 from .api.runs import make_router as make_runs_router
+from .api.settings import make_router as make_settings_router
+from .api.settings import setup_required
 from .api.trips import make_router as make_trips_router
 from .config import (
     DATA_DIR,
@@ -37,9 +40,12 @@ def create_app(
     *,
     database_path: Path | None = None,
     frontend_dir: Path = ROOT_DIR / "frontend" / "dist",
+    settings_path: Path | None = None,
+    desktop_token: str | None = None,
 ):
     configure_transport_logging()
-    settings = settings or Settings.load()
+    settings_path = settings_path if settings_path is not None else DATA_DIR / ".env"
+    settings = settings or Settings.load(settings_path)
     database = Database(
         database_path
         or (DATA_DIR if export_dir == EXPORT_DIR else export_dir) / "easytrip.sqlite3"
@@ -76,6 +82,7 @@ def create_app(
     application.include_router(make_discovery_router())
     application.include_router(make_places_router())
     application.include_router(make_planning_router())
+    application.include_router(make_settings_router(settings, settings_path))
     application.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
     )
@@ -85,6 +92,16 @@ def create_app(
         origin = request.headers.get("origin")
         if origin and origin != str(request.base_url).rstrip("/"):
             return Response("不允许跨来源访问本机服务", status_code=403)
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return Response("不允许跨来源访问本机服务", status_code=403)
+        if desktop_token:
+            if request.method == "GET" and request.url.path == f"/desktop/{desktop_token}":
+                response = RedirectResponse("/?setup=1" if setup_required(settings_path) else "/", status_code=303)
+                response.set_cookie("easytrip_session", desktop_token, httponly=True, samesite="strict")
+                response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+                return response
+            if not secrets.compare_digest(request.cookies.get("easytrip_session", ""), desktop_token):
+                return Response("请从 EasyTrip 桌面窗口访问", status_code=403)
         return await call_next(request)
 
     application.mount(

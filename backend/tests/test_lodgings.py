@@ -61,8 +61,9 @@ def test_meal_contexts_do_not_borrow_the_previous_days_activity():
     assert contexts == []
 
 
-def test_lodging_supplement_keeps_sources_comments_and_unique_poi_without_choosing_nights(
-    runtime, monkeypatch
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_lodging_supplement_keeps_sources_comments_and_selected_poi_without_choosing_nights(
+    runtime, monkeypatch, ambiguous
 ):
     runner, task = runtime
     calls = install_sources(monkeypatch, category="stay", comment_evidence=True)
@@ -70,7 +71,7 @@ def test_lodging_supplement_keeps_sources_comments_and_unique_poi_without_choosi
     original = deepcopy(value)
     contexts = lodging_queries(value, [schedule(value)])
     result = asyncio.run(
-        _supplement_places(runner, task, None, value, Hotels(), contexts, "stay")
+        _supplement_places(runner, task, None, value, Hotels(ambiguous=ambiguous), contexts, "stay")
     )
     assert len(result["candidates"]) == 2 and not result["gaps"]
     assert calls["models"] == 2 and sum(calls["comment_limits"]) == 5
@@ -83,6 +84,7 @@ def test_lodging_supplement_keeps_sources_comments_and_unique_poi_without_choosi
                 connection, task["trip_id"], item["candidate_id"]
             )
             assert match.status == "unique" and match.poi.id == item["poi"]["id"]
+            assert len(match.options) == (2 if ambiguous else 1)
     assert value == original
     assert result["candidates"][0]["evidence"]
     assert not result["candidates"][1][
@@ -96,7 +98,7 @@ def test_lodging_supplement_keeps_sources_comments_and_unique_poi_without_choosi
 
 @pytest.mark.parametrize(
     "options",
-    [{"ambiguous": True}, {"far": True}, {"wrong_detail": True}, {"exhausted": True}],
+    [{"wrong_city": True}, {"far": True}, {"wrong_detail": True}, {"exhausted": True}],
 )
 def test_lodging_failures_keep_dated_gaps(runtime, monkeypatch, options):
     runner, task = runtime

@@ -4,6 +4,38 @@ import type { Workspace } from './api';
 import { defaultPlanningBudget } from './planning-types';
 
 afterEach(() => vi.unstubAllGlobals());
+it('previews and confirms env imports separately and sends configuration checks without saving', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.importSettings('current', 'AGNES_KEY=local-only');
+  await api.importSettings('current', 'AGNES_KEY=local-only', true);
+  await api.checkSettings('current', { model_id: 'draft' });
+  await api.completeSetup();
+  expect(JSON.parse(send.mock.calls[0][1].body)).toEqual({ revision: 'current', content: 'AGNES_KEY=local-only', apply: false });
+  expect(JSON.parse(send.mock.calls[1][1].body).apply).toBe(true);
+  expect(send.mock.calls[2][0]).toBe('/api/settings/check');
+  expect(JSON.parse(send.mock.calls[2][1].body)).toEqual({ revision: 'current', changes: { model_id: 'draft' } });
+  expect(send.mock.calls[3][0]).toBe('/api/settings/setup-complete');
+  expect(send.mock.calls.every(([, options]) => options.headers['X-EasyTrip-Settings'] === '1')).toBe(true);
+});
+it('saves only settings changes with the current revision and the local settings header', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.saveSettings('current', { amap_web_key: 'replacement', rail_mcp: '' });
+  expect(send.mock.calls[0][0]).toBe('/api/settings');
+  expect(send.mock.calls[0][1].method).toBe('PUT');
+  expect(send.mock.calls[0][1].headers).toEqual({ 'Content-Type': 'application/json', 'X-EasyTrip-Settings': '1' });
+  expect(JSON.parse(send.mock.calls[0][1].body)).toEqual({ revision: 'current', changes: { amap_web_key: 'replacement', rail_mcp: '' } });
+});
+it('limits automatic matching to the saved candidates and keeps both version guards', async () => {
+  const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
+  vi.stubGlobal('fetch', send);
+  await api.matchPlaces('one', 7, 9, 'run-one', ['candidate-one']);
+  expect(JSON.parse(send.mock.calls[0][1].body)).toEqual({ expected_version: 7, expected_workspace_version: 9, run_id: 'run-one', refresh_map: false, candidate_ids: ['candidate-one'] });
+  await api.matchPlaces('one', 7, 9, 'run-one');
+  expect(JSON.parse(send.mock.calls[1][1].body)).not.toHaveProperty('candidate_ids');
+});
+
 it('queries the server railway MCP with only saved conditions and concrete station IDs', async () => {
   const send = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }));
   vi.stubGlobal('fetch', send);

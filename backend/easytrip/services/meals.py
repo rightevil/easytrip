@@ -16,7 +16,7 @@ from ..domain.places import MatchPlaces, Poi
 from ..integrations.amap import AmapBudgetExceeded
 from .collection import CollectionService
 from .evidence import build_candidates, extract_note
-from .places import match_pois, normalize_poi
+from .places import normalize_poi, select_poi
 
 
 def _time(value):
@@ -365,7 +365,7 @@ async def _supplement_places(runner, run, client, frozen, amap, contexts, catego
                 ]
                 raw = await amap.search_candidates(candidate["name"], context["city"])
                 timestamp = datetime.now(timezone.utc).isoformat()
-                match = match_pois(candidate, mentions, raw, timestamp)
+                match = select_poi(candidate, mentions, raw, timestamp)
                 if match["status"] != "unique":
                     continue
                 detail = await amap.detail(match["poi"]["id"])
@@ -376,7 +376,7 @@ async def _supplement_places(runner, run, client, frozen, amap, contexts, catego
                     or not isinstance(raw_pois[0], dict)
                 ):
                     continue
-                verified = match_pois(
+                verified = select_poi(
                     candidate,
                     mentions,
                     {
@@ -393,6 +393,8 @@ async def _supplement_places(runner, run, client, frozen, amap, contexts, catego
                 if (
                     verified["status"] != "unique"
                     or verified["poi"]["id"] != match["poi"]["id"]
+                    or verified["poi"]["city"].removesuffix("市")
+                    != match["poi"]["city"].removesuffix("市")
                 ):
                     continue
                 poi = Poi.model_validate(
@@ -438,7 +440,8 @@ async def _supplement_places(runner, run, client, frozen, amap, contexts, catego
                             candidate["id"]: {
                                 "status": "unique",
                                 "poi": poi,
-                                "reason": "住宿补查已核对具体分店与区域",
+                                "options": match["options"],
+                                "reason": match["reason"] + "所选住宿详情与区域已核对。",
                             }
                         },
                     )

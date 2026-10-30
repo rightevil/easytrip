@@ -405,14 +405,15 @@ def api(saved, monkeypatch):
                     "pois": [
                         raw_poi(
                             identifier,
+                            **mode.get("poi_fields", {}),
                             cityname="上海市"
                             if mode["detail"] == "wrong_city"
-                            else "杭州市",
+                            else mode.get("city", "杭州市"),
                         )
                     ],
                 },
             )
-        pois = [raw_poi()]
+        pois = [raw_poi(**mode.get("poi_fields", {}), cityname=mode.get("city", "杭州市"))]
         if mode["search"] == "ambiguous":
             pois.append(raw_poi("poi-2", "西湖(另一分店)"))
         return httpx.Response(
@@ -476,14 +477,12 @@ def test_confirm_api_details_selected_id_and_failure_preserves_saved_options(api
     client, database, trip, candidate, calls, mode = api
     mode["search"] = "ambiguous"
     url = f"/api/trips/{trip['id']}/places"
-    assert (
-        client.post(
-            url + "/match",
-            json={"expected_version": 1, "expected_workspace_version": 1},
-        ).json()["matches"][0]["status"]
-        == "ambiguous"
-    )
-    body = {"expected_version": 1, "expected_workspace_version": 1, "poi_id": "fake"}
+    matched = client.post(
+        url + "/match", json={"expected_version": 1, "expected_workspace_version": 1}
+    ).json()
+    assert matched["matches"][0]["status"] == "unique"
+    assert not matched["matches"][0]["confirmed"]
+    body = {"expected_version": 1, "expected_workspace_version": matched["trip"]["workspace_version"], "poi_id": "fake"}
     assert (
         client.post(url + f"/candidates/{candidate.id}/confirm", json=body).status_code
         == 409
@@ -495,12 +494,68 @@ def test_confirm_api_details_selected_id_and_failure_preserves_saved_options(api
         response = client.post(url + f"/candidates/{candidate.id}/confirm", json=body)
         assert response.status_code == 502
         assert "provider-secret" not in response.text
-        assert client.get(url).json()["matches"][0]["status"] == "ambiguous"
+        assert client.get(url).json()["matches"][0]["status"] == "unique"
     mode["detail"] = "success"
     response = client.post(url + f"/candidates/{candidate.id}/confirm", json=body)
     assert response.status_code == 200
     assert response.json()["matches"][0]["confirmed"]
     assert calls[-1].url.path.endswith("detail")
+
+
+@pytest.mark.parametrize("detail_mode,expected", [("success", 200), ("wrong_city", 502)])
+def test_candidate_confirmation_uses_selected_provider_city_instead_of_source_county(
+    api, detail_mode, expected
+):
+    client, database, trip, candidate, _, mode = api
+    mode.update(
+        city="宁波市",
+        poi_fields={
+            "name": "宁波松兰山滨海旅游度假区",
+            "location": "121.968,29.431",
+            "adcode": "330225",
+            "address": "松兰山枫涛路1号",
+        },
+        detail=detail_mode,
+    )
+    with database.connection(write=True) as connection:
+        connection.execute(
+            "UPDATE candidates SET payload_json=json_set(payload_json,'$.city',?,'$.name',?) WHERE id=?",
+            ("象山", "松兰山", candidate.id),
+        )
+    url = f"/api/trips/{trip['id']}/places"
+    matched = client.post(
+        url + "/match", json={"expected_version": 1, "expected_workspace_version": 1}
+    )
+    assert matched.status_code == 200, matched.text
+    assert matched.json()["matches"][0]["status"] == "unique"
+    response = client.post(
+        url + f"/candidates/{candidate.id}/confirm",
+        json={"expected_version": 1, "expected_workspace_version": matched.json()["trip"]["workspace_version"], "poi_id": "poi-1"},
+    )
+    assert response.status_code == expected, response.text
+    result = client.get(url).json()
+    assert result["candidates"][0]["city"] == "象山"
+    if expected == 200:
+        assert result["matches"][0]["confirmed"]
+        assert result["matches"][0]["poi"]["city"] == "宁波市"
+    else:
+        assert result["matches"][0]["status"] == "unique"
+
+
+def test_automatic_rematching_preserves_a_user_adjusted_poi(api):
+    client, _, trip, candidate, _, mode = api
+    mode["search"] = "ambiguous"
+    url = f"/api/trips/{trip['id']}/places"
+    matched = client.post(url + "/match", json={"expected_version": 1, "expected_workspace_version": 1}).json()
+    assert matched["matches"][0]["poi"]["id"] == "poi-1"
+    adjusted = client.post(
+        url + f"/candidates/{candidate.id}/confirm",
+        json={"expected_version": 1, "expected_workspace_version": matched["trip"]["workspace_version"], "poi_id": "poi-2"},
+    )
+    assert adjusted.status_code == 200, adjusted.text
+    result = client.post(url + "/match", json={"expected_version": 1, "expected_workspace_version": adjusted.json()["trip"]["workspace_version"]}).json()
+    assert result["matches"][0]["poi"]["id"] == "poi-2"
+    assert result["matches"][0]["confirmed"]
 
 
 def test_origin_api_requires_confirmation_and_validated_detail(api):

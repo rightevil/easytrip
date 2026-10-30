@@ -690,7 +690,9 @@ class PlaceStore:
                 raise OperationConflict("只能确认已保存的有效备选POI")
             return {
                 "poi": chosen.model_dump(mode="json"),
-                "city": candidate.get("city")
+                # Source regions may be counties; verify against the selected provider POI.
+                "city": chosen.city
+                or candidate.get("city")
                 or next(
                     (mention["city"] for mention in mentions if mention.get("city")),
                     None,

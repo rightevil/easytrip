@@ -89,9 +89,10 @@ def runtime(tmp_path):
 
 class MockAmap:
     def __init__(
-        self, *, ambiguous=False, far=False, wrong_detail=False, exhausted=False
+        self, *, ambiguous=False, far=False, wrong_detail=False, wrong_city=False, exhausted=False
     ):
         self.calls = []
+        self.wrong_city = wrong_city
         self.ambiguous, self.far, self.wrong_detail, self.exhausted = (
             ambiguous,
             far,
@@ -123,7 +124,10 @@ class MockAmap:
         return {
             "status": "1",
             "pois": [
-                self.poi(identifier, "wrong-id" if self.wrong_detail else identifier)
+                {
+                    **self.poi(identifier, "wrong-id" if self.wrong_detail else identifier),
+                    "cityname": "上海市" if self.wrong_city else "杭州市",
+                }
             ],
         }
 
@@ -497,9 +501,9 @@ def test_successful_meal_analysis_counts_evidence_and_cached_reuse_does_not_repe
 
 
 @pytest.mark.parametrize(
-    "amap", [MockAmap(ambiguous=True), MockAmap(far=True), MockAmap(wrong_detail=True)]
+    "amap", [MockAmap(wrong_city=True), MockAmap(far=True), MockAmap(wrong_detail=True)]
 )
-def test_ambiguous_outside_area_or_wrong_detail_never_enters_plan(
+def test_outside_city_area_or_wrong_detail_never_enters_plan(
     runtime, monkeypatch, amap
 ):
     install_sources(monkeypatch)
@@ -512,6 +516,19 @@ def test_ambiguous_outside_area_or_wrong_detail_never_enters_plan(
         assert result["candidates"] == []
         assert len(result["gaps"]) == 2
         assert all(gap["reason"] == "poi_not_confirmed" for gap in result["gaps"])
+
+    asyncio.run(check())
+
+
+def test_meal_agent_selects_a_default_from_multiple_provider_results(runtime, monkeypatch):
+    install_sources(monkeypatch)
+    runner, run = runtime
+
+    async def check():
+        amap = MockAmap(ambiguous=True)
+        result = await supplement_meals(runner, run, None, frozen_input(), suggestions(), amap)
+        assert len(result["candidates"]) == 2 and not result["gaps"]
+        assert sum(call[0] == "detail" for call in amap.calls) == 2
 
     asyncio.run(check())
 

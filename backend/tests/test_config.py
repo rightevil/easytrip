@@ -224,6 +224,12 @@ def test_real_http_client_ignores_proxy_environment(monkeypatch):
         "https://user:secret@example.com",
         "https:///missing-host",
         "localhost:8000",
+        "http://localhost:bad/mcp",
+        "http://localhost:70000/mcp",
+        "http://localhost:0/mcp",
+        "https://host with spaces/mcp",
+        "https://host/mcp#fragment",
+        "https://host/mcp\n",
     ],
 )
 def test_invalid_service_urls_are_rejected(url):

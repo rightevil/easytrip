@@ -17,7 +17,7 @@ from ..domain.places import (
     Poi,
 )
 from ..integrations.amap import Amap, AmapBudgetExceeded, AmapError
-from ..services.places import match_pois, normalize_poi
+from ..services.places import normalize_poi, select_poi
 from ..storage.database import now
 from .trips import _call
 
@@ -257,7 +257,7 @@ def make_router():
                             city,
                             body.expected_version,
                         )
-                        matches[candidate["id"]] = match_pois(
+                        matches[candidate["id"]] = select_poi(
                             candidate, mentions, response, now()
                         )
                     except AmapBudgetExceeded:

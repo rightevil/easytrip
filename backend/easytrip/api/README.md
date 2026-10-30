@@ -75,9 +75,9 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 
 已经初始化地图或本行程已有 POI 匹配覆盖时，普通 `PATCH /workspace` 无条件保留数据库内的 `map_visible_ids/selected_ids`，忽略提交的旧集合；集合修改必须走 `/places/map`。普通保存保留起点与初始化状态并校验工作区版本，视野、类别和标签仍可编辑。尚未开始 P3 的 P1 工作区继续兼容历史集合。
 
-`matches` 含 `candidate_id/run_id/request_version/status/poi/options/reason/confirmed/updated_at`。状态为 `unique/ambiguous/unmatched`；只有唯一匹配或显式确认且有真实 ID、名称、有效坐标的候选可加入地图或行程选择。泛称和探索方向不直接转成具体 POI。标准 POI 为 `id/name/location/address/city/adcode/type/entrance_location/read_at/api_version/missing_fields`；`location` 是 GCJ-02 `[经度,纬度]`，未取得字段为 `null` 并列入 `missing_fields`，入口缺失不复用中心点。
+`matches` 含 `candidate_id/run_id/request_version/status/poi/options/reason/confirmed/updated_at`。状态为 `unique/ambiguous/unmatched`；unique 表示已选定可用 POI，可以来自严格匹配、自动默认选择或用户调整；confirmed 仅表示用户已调整，自动选择不冒充用户确认。所有落点均需真实 ID、名称及有效坐标。泛称和探索方向不直接转成具体 POI。标准 POI 为 `id/name/location/address/city/adcode/type/entrance_location/read_at/api_version/missing_fields`；`location` 是 GCJ-02 `[经度,纬度]`，未取得字段为 `null` 并列入 `missing_fields`，入口缺失不复用中心点。
 
-每次匹配最多 20 个候选，`candidate_ids` 显式指定时最多 20 个；默认每个名称至多两页、每页 20 条。操作共限 40 次物理请求和 60 秒，`budget` 返回 `candidate_limit/call_limit/timeout_seconds/calls/processed/limited`，缓存命中不记新请求。应用内高德请求共享 1.1 秒间隔，不自动重试 QPS 错误。超时或预算结束保留已完成匹配与原候选。缓存以规范化名称、城市、v5 版本为键，24 小时到期，保留原 `read_at`；高德 `count` 仅指本页数量，页数未穷尽不自动唯一匹配。
+每次匹配最多 20 个候选，`candidate_ids` 显式指定时最多 20 个；默认每个名称至多两页、每页 20 条。操作共限 40 次物理请求和 60 秒，`budget` 返回 `candidate_limit/call_limit/timeout_seconds/calls/processed/limited`，缓存命中不记新请求。应用内高德请求共享 1.1 秒间隔，不自动重试 QPS 错误。超时或预算结束保留已完成匹配与原候选。缓存以规范化名称、城市、v5 版本为键，24 小时到期，保留原 `read_at`；高德 `count` 仅指本页数量；检索未穷尽时仍可选定相关的默认 POI，并在 reason 保留该不确定性。前端在展示当前轮具体候选后自动按每批最多20个提交 candidate_ids，同一候选不会在一次页面会话中因失败而反复自动重试；历史、归档及运行中的发现不触发该查询。
 
 人工确认和高德起点确认额外请求所选 ID 的详情，限制一次物理请求、30 秒，核对唯一返回的 ID、有效坐标、名称及城市。起点搜索最多两次请求、30 秒。详情错误返回 502，未配置高德服务返回 503，空白城市/关键词等入参错误为 422，行程归属、旧条件、已归档或版本冲突拒绝操作；确认失败不替换原备选。异步核对结果提交时复查条件与匹配会话，工作区已有更新时保留新点集并返回 `map_update_skipped`。
 
@@ -126,6 +126,16 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/trips/$($trip.id)"
 - `payload.days` 保存当日起终点、窗口、住宿、活动、交通与问题，平坦 `itinerary` 仍保持逐项一致。`kind:rail` 使用用户确认时刻及两站资料，不伪装成高德 `RouteLeg`。跨午夜用 `overnight_rail_id/continuing_rail_id` 连接在途和到达日。
 - 住宿补查候选带 `lodging_window`（`date/anchor_candidate_id/anchor_name/anchor_location/city`），与餐饮共用 Run 预算，来源/POI 保存后仍须用户明确逐晚绑定并重排。房态、实时价格、办理时长和行李寄存未知时保留待核实项。
 - 重新规划按日比较语义输入，保留未受影响的日期和有效前缀；已完成/锁定和过去酒店/铁路不允许静默改写。执行中进度只接受当前采用父方案，历史交通计划的实际执行与费用没有确认时仍未知。采用继续核验版本、签名、有效期、逐日连续性、真实站点、时刻与缓冲。
+
+## 本机设置与桌面首次使用
+
+- `GET /api/settings`：返回九项配置的存在状态（只有模型名回显）、配置路径、revision、重启提示、各服务本机检查及首次引导状态。密钥与地址不回传。
+- `PUT /api/settings`：接收 `{revision,changes}`，只更改明确提交的已知字段，空字符串为显式清除；原子保存后重启生效。
+- `POST /api/settings/check`：接收 `{revision,changes}`，对保存值合并当前编辑后检查格式和必填项，不写文件、不请求外部服务。结果保留 `configured_not_probed`，不能当成连通或凭证有效证明。
+- `POST /api/settings/import`：接收 `{revision,content,apply}`；UTF-8 `.env` 原文最多 64 KB。`apply:false` 只返回识别字段、忽略/空值数量及合并检查；`apply:true` 才原子写入，并返回新的设置快照。兼容别名与大小写，非空标准字段优先，空值不清除原值；不展开环境变量、不返回原文，错误只指明字段或行号。预览后版本变化返回 409，禁止覆盖其他窗口的修改。
+- `POST /api/settings/setup-complete`：接收 `{}`，记录用户跳过/完成首次引导，不生成假配置。桌面会话初始化时仅对没有配置与完成标记的数据目录跳转 `/?setup=1`。
+
+上述写入、预览和检查请求均要求 `X-EasyTrip-Settings: 1`，沿用 Host/同源与桌面会话限制；JSON 请求有大小上限，响应禁用缓存。格式错误返回 400，配置冲突 409，文件读写失败返回不含凭证的 500。
 
 ## 真实 12306 MCP 查询（用户追加）
 

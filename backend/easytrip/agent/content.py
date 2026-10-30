@@ -108,7 +108,7 @@ async def inherited_extraction(runner, run, note):
 async def analyse(runner, run, snapshot, client):
     from .discovery import DiscoveryPaused, DiscoveryStopped
 
-    for record in await records(runner, run):
+    for record in sorted(await records(runner, run), key=lambda item: not item.get("reused_from_run")):
         note = record["note"]
         key = "extract:" + note["source_id"]
         result = await runner.db("get_run_item", run["id"], key)
@@ -416,6 +416,11 @@ async def publish(runner, run, snapshot, *, stop_reason=None):
     current = await runner.db("get_run", run["id"])
     usage = current["usage"]
     reasons = [stop_reason] if stop_reason else []
+    if any(
+        current["checkpoint"].get(stage, {}).get("stop_reason") == "collection_time_reserved"
+        for stage in ("discovering", "fetching")
+    ):
+        reasons.append("collection_time_reserved")
     if usage["notes_obtained"] < run["budget"]["target_notes"]:
         reasons.append("note_target_not_reached")
     if (

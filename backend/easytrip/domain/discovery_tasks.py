@@ -20,7 +20,7 @@ Count = Annotated[int, Field(strict=True, ge=0)]
 
 class DiscoveryBudget(Model):
     max_steps: Annotated[int, Field(strict=True, ge=1, le=400)] = 160
-    max_seconds: Annotated[int, Field(strict=True, ge=1, le=1800)] = 600
+    max_seconds: Annotated[int, Field(strict=True, ge=1, le=1800)] = 1800
     max_searches: Annotated[int, Field(strict=True, ge=1, le=16)] = 8
     target_notes: Annotated[int, Field(strict=True, ge=1, le=60)] = 30
     comment_limit: Annotated[int, Field(strict=True, ge=0, le=50)] = 20
