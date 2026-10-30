@@ -74,7 +74,7 @@ GitHub Actions 在 `main`、PR 和手动触发时运行 Windows 回归与单文�
 
 发布仍由 Commitizen 管理，先提交功能改动，再运行 `cz bump --version-files-only --check-consistency --yes`；随后执行 `uv --directory backend lock`，把版本、锁文件与 Changelog 一起提交。为该最终提交创建对应 annotated `vX.Y.Z` Tag，推送提交和 Tag 后等待 Actions 完成；不要提前给缺少锁文件变更的提交打 Tag。CI 只构建和发布，不自行更改版本或反复 bump。内部前端 npm 包版本不作为桌面产品发布版本。
 
-当前产品版本为 `0.2.0`，由根目录 `.cz.toml` 与 `backend/pyproject.toml`统一管理，**无需再运行 `cz init`**：
+当前产品版本为 `0.3.0`，由根目录 `.cz.toml` 与 `backend/pyproject.toml`统一管理，**无需再运行 `cz init`**：
 
 T05/T07已按用户接受的AI基准达到发布门槛，不声明人工认证；最终版本与交付记录见 [P6验收报告](docs/p6-acceptance.md)。普通切片提交不 bump。
 
